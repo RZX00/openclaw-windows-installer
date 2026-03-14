@@ -1,0 +1,21 @@
+This repository contains original Windows packaging and wrapper code for the
+`openclaw-setup-cn` project.
+
+This repository also contains material derived from or adapted against the
+OpenClaw project:
+
+- Project: OpenClaw
+- Repository: https://github.com/openclaw/openclaw
+- License: MIT
+- Upstream copyright: Copyright (c) 2025 Peter Steinberger
+
+The vendored upstream snapshot retained for compatibility lives under:
+
+- `client/package`
+
+The upstream license text is retained at:
+
+- `client/package/LICENSE`
+
+This project is an independent wrapper/distribution layer and is not the
+official OpenClaw repository.

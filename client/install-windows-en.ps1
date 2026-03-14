@@ -1,0 +1,83 @@
+﻿[CmdletBinding()]
+param(
+    [ValidateSet("stable", "latest", "beta")]
+    [string]$Channel,
+    [ValidateSet("auto", "bundle", "npm", "git")]
+    [string]$InstallMode,
+    [ValidateSet("auto", "user", "machine")]
+    [string]$Scope,
+    [ValidateSet("auto", "official", "china", "custom")]
+    [string]$Mirror,
+    [string]$BundlePath,
+    [string]$ArtifactBaseUrl,
+    [string]$LicenseApiBaseUrl,
+    [switch]$NoLicenseGate,
+    [switch]$NoOnboard,
+    [switch]$NoDoctor,
+    [switch]$DryRun
+)
+
+$ErrorActionPreference = "Stop"
+
+function Test-IsAdministrator {
+    try {
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+        return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch {
+        return $false
+    }
+}
+
+function Get-CoreScriptPath {
+    $localCore = $null
+    if ($PSScriptRoot) {
+        $localCore = Join-Path $PSScriptRoot "install-windows-core.ps1"
+        if (Test-Path -LiteralPath $localCore) {
+            return $localCore
+        }
+    }
+
+    $baseUrl = [Environment]::GetEnvironmentVariable("OPENCLAW_INSTALLER_BASE_URL")
+    if ([string]::IsNullOrWhiteSpace($baseUrl)) {
+        $baseUrl = "https://raw.githubusercontent.com/736773174/openclaw-setup-cn/main"
+    }
+
+    $target = Join-Path $env:TEMP "openclaw-install-windows-core.ps1"
+    $url = "{0}/install-windows-core.ps1" -f $baseUrl.TrimEnd("/")
+    Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $target -ErrorAction Stop
+    return $target
+}
+
+try {
+    if (-not (Test-IsAdministrator)) {
+        throw "Please rerun the Windows installer from an elevated Administrator PowerShell."
+    }
+
+    $coreScript = Get-CoreScriptPath
+    $invoke = @{}
+    foreach ($key in $PSBoundParameters.Keys) {
+        $invoke[$key] = $PSBoundParameters[$key]
+    }
+    if (-not $invoke.ContainsKey("NoLicenseGate")) {
+        $invoke["NoLicenseGate"] = $true
+    }
+
+    $invoke["Locale"] = "en-US"
+    if (-not $invoke.ContainsKey("InvokerRoot")) {
+        if ($PSScriptRoot) {
+            $invoke["InvokerRoot"] = $PSScriptRoot
+        } else {
+            $invoke["InvokerRoot"] = (Get-Location).Path
+        }
+    }
+
+    & $coreScript @invoke
+} catch {
+    Write-Host ""
+    Write-Host "[ERROR] Failed to bootstrap the Windows installer:" -ForegroundColor Red -NoNewline
+    Write-Host " $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "[HINT] Windows installation now requires an elevated Administrator PowerShell. For no-VPN environments, set OPENCLAW_ARTIFACT_BASE_URL or pass -BundlePath with a local offline bundle." -ForegroundColor Yellow
+    Write-Host ""
+    throw
+}
