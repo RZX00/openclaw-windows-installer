@@ -1,0 +1,48 @@
+name: windows-release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build release assets
+        id: build
+        shell: pwsh
+        run: |
+          $releaseDir = Join-Path $env:RUNNER_TEMP "openclaw-release"
+          $tag = ""
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $tag = "${{ github.ref_name }}"
+          }
+
+          powershell -ExecutionPolicy Bypass -File .\scripts\build-release-assets.ps1 `
+            -OutputDir $releaseDir `
+            -ReleaseTag $tag
+
+          "release_dir=$releaseDir" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: ${{ steps.build.outputs.release_dir }}/OpenClaw-Setup-Windows-x64.exe
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            ${{ steps.build.outputs.release_dir }}/OpenClaw-Setup-Windows-x64.exe
