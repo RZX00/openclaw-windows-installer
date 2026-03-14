@@ -1,0 +1,8 @@
+{
+  "channel": "stable",
+  "architecture": "x64",
+  "version": "2026.3.8",
+  "packageTag": "latest",
+  "updatedAt": "2026-03-09T17:00:00+08:00",
+  "notes": "Stable Windows maintenance manifest. Update this file when the supported stable release changes."
+}

@@ -1,0 +1,2986 @@
+[CmdletBinding()]
+param(
+    [ValidateSet("Start", "Update", "Repair")]
+    [string]$Mode = "Start",
+    [string]$LogPath,
+    [string]$InvokerPath,
+    [string]$InstallRoot
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+$script:ExitCodes = @{
+    Success           = 0
+    NeedsAttention    = 10
+    NoChanges         = 20
+    ReinstallRequired = 30
+}
+
+$initialInstallRoot = $InstallRoot
+if ([string]::IsNullOrWhiteSpace($initialInstallRoot)) {
+    $initialInstallRoot = [Environment]::GetEnvironmentVariable("OPENCLAW_INSTALL_ROOT")
+}
+if ([string]::IsNullOrWhiteSpace($initialInstallRoot)) {
+    $initialInstallRoot = Join-Path $env:ProgramData "OpenClaw"
+}
+
+$script:Context = [ordered]@{
+    Mode         = $Mode
+    DataRoot     = $initialInstallRoot
+    SupportRoot  = Join-Path $initialInstallRoot "support"
+    WrapperDir   = Join-Path $initialInstallRoot "bin"
+    StatePath    = Join-Path $initialInstallRoot "install-state.json"
+    LogPath      = $LogPath
+    InvokerPath  = $InvokerPath
+    WrapperPath  = $null
+    State        = $null
+    TempRoot     = Join-Path $env:TEMP ("openclaw-maintenance-" + [guid]::NewGuid().ToString("N"))
+    Capabilities = [ordered]@{
+        DaemonStatusJson      = $false
+        StatusDeep           = $false
+        StatusAll            = $false
+        HealthJson           = $false
+        GatewayStatusRequireRpc = $false
+        GatewayStatusJson    = $false
+        GatewayStatus        = $false
+        GatewayInstall       = $false
+        GatewayStart         = $false
+        GatewayStop          = $false
+        GatewayRestart       = $false
+        DoctorRepair         = $false
+        DoctorNonInteractive = $false
+        Dashboard            = $false
+    }
+}
+
+function Ensure-Directory {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return
+    }
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        New-Item -ItemType Directory -Path $Path -Force | Out-Null
+    }
+}
+
+function Add-UniqueString {
+    param(
+        [System.Collections.Generic.List[string]]$List,
+        [string]$Value
+    )
+
+    if ($null -eq $List -or [string]::IsNullOrWhiteSpace($Value)) {
+        return
+    }
+
+    $trimmed = $Value.Trim()
+    if ([string]::IsNullOrWhiteSpace($trimmed)) {
+        return
+    }
+
+    foreach ($existing in $List) {
+        if ([string]::Equals($existing, $trimmed, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return
+        }
+    }
+
+    $List.Add($trimmed) | Out-Null
+}
+
+function Resolve-InstallRootFromBasePath {
+    param([string]$BasePath)
+
+    if ([string]::IsNullOrWhiteSpace($BasePath)) {
+        return $null
+    }
+
+    $candidate = $BasePath.Trim()
+    if ([string]::IsNullOrWhiteSpace($candidate)) {
+        return $null
+    }
+
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+        $candidate = Split-Path -Path $candidate -Parent
+    }
+
+    if ([string]::IsNullOrWhiteSpace($candidate)) {
+        return $null
+    }
+
+    $leaf = Split-Path -Path $candidate -Leaf
+    if ($leaf -ieq "bin" -or $leaf -ieq "support") {
+        return (Split-Path -Path $candidate -Parent)
+    }
+
+    return $candidate
+}
+
+function Get-InstallRootCandidateList {
+    $candidates = New-Object System.Collections.Generic.List[string]
+
+    Add-UniqueString -List $candidates -Value $InstallRoot
+    Add-UniqueString -List $candidates -Value ([Environment]::GetEnvironmentVariable("OPENCLAW_INSTALL_ROOT"))
+    Add-UniqueString -List $candidates -Value $script:Context.DataRoot
+    Add-UniqueString -List $candidates -Value (Join-Path $env:ProgramData "OpenClaw")
+
+    if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        Add-UniqueString -List $candidates -Value (Join-Path $env:LOCALAPPDATA "OpenClaw")
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:APPDATA)) {
+        Add-UniqueString -List $candidates -Value (Join-Path $env:APPDATA "OpenClaw")
+    }
+
+    Add-UniqueString -List $candidates -Value (Resolve-InstallRootFromBasePath -BasePath $InvokerPath)
+    Add-UniqueString -List $candidates -Value (Resolve-InstallRootFromBasePath -BasePath $PSScriptRoot)
+    Add-UniqueString -List $candidates -Value (Resolve-InstallRootFromBasePath -BasePath $PSCommandPath)
+
+    return $candidates
+}
+
+function Get-InstallRootScore {
+    param([string]$Root)
+
+    if ([string]::IsNullOrWhiteSpace($Root)) {
+        return -1
+    }
+
+    $score = 0
+    if (Test-Path -LiteralPath $Root -PathType Container) {
+        $score += 1
+    } else {
+        return -1
+    }
+
+    if (Test-Path -LiteralPath (Join-Path $Root "install-state.json") -PathType Leaf) {
+        $score += 30
+    }
+    if (Test-Path -LiteralPath (Join-Path $Root "support\\OpenClaw-Maintenance.ps1") -PathType Leaf) {
+        $score += 20
+    }
+    if (Test-Path -LiteralPath (Join-Path $Root "bin\\openclaw.cmd") -PathType Leaf) {
+        $score += 15
+    }
+    if (Test-Path -LiteralPath (Join-Path $Root "bundles") -PathType Container) {
+        $score += 8
+    }
+    if (Test-Path -LiteralPath (Join-Path $Root "source") -PathType Container) {
+        $score += 8
+    }
+    if (Test-Path -LiteralPath (Join-Path $Root "tools") -PathType Container) {
+        $score += 5
+    }
+
+    return $score
+}
+
+function Set-InstallContextRoot {
+    param([string]$Root)
+
+    if ([string]::IsNullOrWhiteSpace($Root)) {
+        return
+    }
+
+    $normalizedRoot = $Root.Trim()
+    $script:Context.DataRoot = $normalizedRoot
+    $script:Context.SupportRoot = Join-Path $normalizedRoot "support"
+    $script:Context.WrapperDir = Join-Path $normalizedRoot "bin"
+    $script:Context.StatePath = Join-Path $normalizedRoot "install-state.json"
+}
+
+function Ensure-InstallContextBound {
+    $bestRoot = $null
+    $bestScore = -1
+    foreach ($candidate in (Get-InstallRootCandidateList)) {
+        $score = Get-InstallRootScore -Root $candidate
+        if ($score -gt $bestScore) {
+            $bestScore = $score
+            $bestRoot = $candidate
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($bestRoot)) {
+        $bestRoot = $script:Context.DataRoot
+    }
+
+    Set-InstallContextRoot -Root $bestRoot
+}
+
+function Get-SystemArchitecture {
+    $architecture = "$env:PROCESSOR_ARCHITECTURE".ToUpperInvariant()
+    if ($architecture -eq "ARM64") {
+        return "arm64"
+    }
+
+    if ([Environment]::Is64BitOperatingSystem) {
+        return "x64"
+    }
+
+    return "x86"
+}
+
+function Get-StateProperty {
+    param(
+        [object]$State,
+        [string]$Name,
+        $Default = $null
+    )
+
+    if ($null -eq $State) {
+        return $Default
+    }
+
+    $property = $State.PSObject.Properties[$Name]
+    if ($null -eq $property) {
+        return $Default
+    }
+
+    if ($null -eq $property.Value) {
+        return $Default
+    }
+
+    if ($property.Value -is [string] -and [string]::IsNullOrWhiteSpace($property.Value)) {
+        return $Default
+    }
+
+    return $property.Value
+}
+
+function Get-UiLocale {
+    Ensure-InstallContextBound
+
+    if ($null -ne $script:Context.State) {
+        $locale = $script:Context.State.PSObject.Properties["locale"]
+        if ($null -ne $locale -and -not [string]::IsNullOrWhiteSpace("$($locale.Value)")) {
+            return "$($locale.Value)"
+        }
+    }
+
+    if (Test-Path -LiteralPath $script:Context.StatePath) {
+        try {
+            $parsed = Get-Content -LiteralPath $script:Context.StatePath -Raw | ConvertFrom-Json
+            $locale = $parsed.PSObject.Properties["locale"]
+            if ($null -ne $locale -and -not [string]::IsNullOrWhiteSpace("$($locale.Value)")) {
+                return "$($locale.Value)"
+            }
+        } catch {}
+    }
+
+    return "zh-CN"
+}
+
+function L {
+    param(
+        [string]$Zh,
+        [string]$En
+    )
+
+    if ((Get-UiLocale) -eq "en-US") {
+        return $En
+    }
+
+    return $Zh
+}
+
+function Write-UiEvent {
+    param([hashtable]$Payload)
+
+    try {
+        $json = $Payload | ConvertTo-Json -Compress -Depth 8
+        Write-Host ("OPENCLAW_UI " + $json)
+    } catch {}
+}
+
+function Write-UiPhase {
+    param(
+        [string]$Key,
+        [string]$Title,
+        [int]$Progress,
+        [string]$Message = $null
+    )
+
+    $payload = [ordered]@{
+        type     = "phase"
+        key      = $Key
+        title    = $Title
+        progress = [Math]::Max(0, [Math]::Min(100, $Progress))
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($Message)) {
+        $payload.message = $Message
+    }
+
+    Write-UiEvent -Payload $payload
+}
+
+function Write-UiStatus {
+    param(
+        [ValidateSet("info", "warn", "error")]
+        [string]$Level = "info",
+        [string]$Message
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        return
+    }
+
+    Write-UiEvent -Payload ([ordered]@{
+        type    = "status"
+        level   = $Level
+        message = $Message
+    })
+}
+
+function Get-DefaultResultMessage {
+    param(
+        [int]$Code,
+        [string]$CurrentMode = $script:Context.Mode
+    )
+
+    switch ($Code) {
+        0 {
+            switch ($CurrentMode) {
+                "Update" { return "Update finished and the Gateway service was restored." }
+                "Repair" { return "Common repair steps finished. Please try chatting again." }
+                default  { return "Start completed and chat is available again." }
+            }
+        }
+        10 { return "Configuration still needs manual action. Onboarding was opened." }
+        20 { return "The current installation is already up to date." }
+        30 { return "The core installation looks damaged. Reinstall is recommended." }
+        default { return "Maintenance failed. Check the log and try again." }
+    }
+}
+
+function Complete-Maintenance {
+    param(
+        [int]$Code,
+        [string]$Message = $null
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        $Message = Get-DefaultResultMessage -Code $Code
+    }
+
+    try {
+        Persist-InstallState -HealthState (Resolve-LastHealthStateForExitCode -Code $Code)
+    } catch {
+        Write-Log -Level "WARN" -Message ("Failed to persist maintenance result state: {0}" -f $_.Exception.Message)
+    }
+
+    Write-UiEvent -Payload ([ordered]@{
+        type    = "result"
+        code    = $Code
+        message = $Message
+    })
+
+    return $Code
+}
+
+function Save-JsonFile {
+    param(
+        [string]$Path,
+        [object]$Object
+    )
+
+    $json = $Object | ConvertTo-Json -Depth 8
+    [System.IO.File]::WriteAllText($Path, $json, (New-Object System.Text.UTF8Encoding($true)))
+}
+
+function Write-Log {
+    param(
+        [string]$Level,
+        [string]$Message
+    )
+
+    if ([string]::IsNullOrWhiteSpace($script:Context.LogPath)) {
+        $logRoot = Join-Path $script:Context.DataRoot "logs"
+        Ensure-Directory -Path $logRoot
+        $script:Context.LogPath = Join-Path $logRoot ("maintenance-" + $script:Context.Mode.ToLowerInvariant() + "-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".log")
+    }
+
+    $line = "[{0}] [{1}] {2}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Level.ToUpperInvariant(), $Message
+    [System.IO.File]::AppendAllText($script:Context.LogPath, $line + [Environment]::NewLine, (New-Object System.Text.UTF8Encoding($true)))
+    Write-Host $line
+}
+
+function Read-JsonFileSafe {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $null
+    }
+
+    try {
+        return (Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json)
+    } catch {
+        Write-Log -Level "WARN" -Message ("Failed to parse JSON: {0} ({1})" -f $Path, $_.Exception.Message)
+        return $null
+    }
+}
+
+function Format-CmdArgument {
+    param([string]$Value)
+
+    if ($null -eq $Value) {
+        return '""'
+    }
+
+    if ($Value -notmatch '[\s"&|<>^()]') {
+        return $Value
+    }
+
+    return '"' + ($Value -replace '"', '""') + '"'
+}
+
+function Read-AppendedLogLines {
+    param(
+        [string]$Path,
+        [int]$KnownLineCount = 0
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return [pscustomobject]@{
+            Count = $KnownLineCount
+            Lines = @()
+        }
+    }
+
+    $allLines = @(Get-Content -LiteralPath $Path -ErrorAction SilentlyContinue)
+    if ($allLines.Count -le $KnownLineCount) {
+        return [pscustomobject]@{
+            Count = $allLines.Count
+            Lines = @()
+        }
+    }
+
+    return [pscustomobject]@{
+        Count = $allLines.Count
+        Lines = @($allLines[$KnownLineCount..($allLines.Count - 1)])
+    }
+}
+
+function Invoke-ProcessCapture {
+    param(
+        [string]$FilePath,
+        [string[]]$Arguments,
+        [string]$WorkingDirectory = $script:Context.DataRoot,
+        [int]$TimeoutSeconds = 0,
+        [switch]$HideWindow
+    )
+
+    $stdoutPath = Join-Path $script:Context.TempRoot ("process-" + [guid]::NewGuid().ToString("N") + ".stdout.log")
+    $stderrPath = Join-Path $script:Context.TempRoot ("process-" + [guid]::NewGuid().ToString("N") + ".stderr.log")
+    $timedOut = $false
+    $exitCode = $null
+    $combinedOutput = New-Object System.Collections.Generic.List[string]
+    $stdoutCount = 0
+    $stderrCount = 0
+
+    try {
+        $process = Start-Process -FilePath $FilePath `
+            -ArgumentList $Arguments `
+            -WorkingDirectory $WorkingDirectory `
+            -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath `
+            -WindowStyle $(if ($HideWindow) { "Hidden" } else { "Normal" }) `
+            -PassThru
+
+        $startedAt = Get-Date
+        while (-not $process.HasExited) {
+            $stdoutUpdate = Read-AppendedLogLines -Path $stdoutPath -KnownLineCount $stdoutCount
+            $stdoutCount = $stdoutUpdate.Count
+            foreach ($line in $stdoutUpdate.Lines) {
+                if ($null -ne $line) {
+                    $combinedOutput.Add("$line") | Out-Null
+                    Write-Log -Level "NOTE" -Message "$line"
+                }
+            }
+
+            $stderrUpdate = Read-AppendedLogLines -Path $stderrPath -KnownLineCount $stderrCount
+            $stderrCount = $stderrUpdate.Count
+            foreach ($line in $stderrUpdate.Lines) {
+                if ($null -ne $line) {
+                    $combinedOutput.Add("$line") | Out-Null
+                    Write-Log -Level "NOTE" -Message "$line"
+                }
+            }
+
+            if ($TimeoutSeconds -gt 0 -and ((Get-Date) - $startedAt).TotalSeconds -ge $TimeoutSeconds) {
+                $timedOut = $true
+                try { $process.Kill() } catch {}
+                break
+            }
+
+            Start-Sleep -Milliseconds 300
+        }
+
+        try { $process.WaitForExit() } catch {}
+        if ($timedOut) {
+            $exitCode = 124
+        } elseif ($null -eq $exitCode) {
+            $exitCode = $process.ExitCode
+        }
+    } finally {
+        foreach ($entry in @(
+            [pscustomobject]@{ Path = $stdoutPath; Count = $stdoutCount },
+            [pscustomobject]@{ Path = $stderrPath; Count = $stderrCount }
+        )) {
+            $update = Read-AppendedLogLines -Path $entry.Path -KnownLineCount $entry.Count
+            foreach ($line in $update.Lines) {
+                if ($null -ne $line) {
+                    $combinedOutput.Add("$line") | Out-Null
+                    Write-Log -Level "NOTE" -Message "$line"
+                }
+            }
+
+            if (Test-Path -LiteralPath $entry.Path) {
+                Remove-Item -LiteralPath $entry.Path -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
+    return [pscustomobject]@{
+        ExitCode = $exitCode
+        Output   = @($combinedOutput.ToArray())
+        TimedOut = $timedOut
+    }
+}
+
+function Invoke-CmdFileCapture {
+    param(
+        [string]$FilePath,
+        [string[]]$Arguments,
+        [int]$TimeoutSeconds = 0
+    )
+
+    $systemRoot = $env:SystemRoot
+    if ([string]::IsNullOrWhiteSpace($systemRoot)) {
+        $systemRoot = $env:WINDIR
+    }
+    if ([string]::IsNullOrWhiteSpace($systemRoot)) {
+        $systemRoot = "C:\Windows"
+    }
+
+    $commandProcessor = Join-Path $systemRoot "System32\cmd.exe"
+    if (-not (Test-Path -LiteralPath $commandProcessor)) {
+        $commandProcessor = "cmd.exe"
+    }
+
+    $exitMarker = "__OPENCLAW_EXITCODE__="
+    $commandLine = ('call "{0}"' -f $FilePath)
+    if ($Arguments -and $Arguments.Count -gt 0) {
+        $commandLine = '{0} {1}' -f $commandLine, (($Arguments | ForEach-Object { Format-CmdArgument -Value $_ }) -join ' ')
+    }
+    $commandLine = '{0} & echo {1}!ERRORLEVEL!' -f $commandLine, $exitMarker
+
+    $stdoutPath = Join-Path $script:Context.TempRoot ("cmd-" + [guid]::NewGuid().ToString("N") + ".stdout.log")
+    $stderrPath = Join-Path $script:Context.TempRoot ("cmd-" + [guid]::NewGuid().ToString("N") + ".stderr.log")
+    $timedOut = $false
+    $exitCode = $null
+    $filteredOutput = New-Object System.Collections.Generic.List[string]
+    $stdoutCount = 0
+    $stderrCount = 0
+
+    try {
+        $process = Start-Process -FilePath $commandProcessor `
+            -ArgumentList @("/d", "/v:on", "/s", "/c", $commandLine) `
+            -WorkingDirectory $script:Context.DataRoot `
+            -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath `
+            -WindowStyle Hidden `
+            -PassThru
+
+        $startedAt = Get-Date
+        while (-not $process.HasExited) {
+            foreach ($update in @(
+                [pscustomobject]@{ Path = $stdoutPath; Name = "stdout" },
+                [pscustomobject]@{ Path = $stderrPath; Name = "stderr" }
+            )) {
+                $knownCount = if ($update.Name -eq "stdout") { $stdoutCount } else { $stderrCount }
+                $tail = Read-AppendedLogLines -Path $update.Path -KnownLineCount $knownCount
+                if ($update.Name -eq "stdout") { $stdoutCount = $tail.Count } else { $stderrCount = $tail.Count }
+
+                foreach ($line in $tail.Lines) {
+                    if ($null -eq $line) {
+                        continue
+                    }
+
+                    $text = "$line"
+                    if ($text.TrimStart() -like "$exitMarker*") {
+                        $rawValue = $text.Substring($text.IndexOf($exitMarker) + $exitMarker.Length).Trim()
+                        $parsedExitCode = 0
+                        if ([int]::TryParse($rawValue, [ref]$parsedExitCode)) {
+                            $exitCode = $parsedExitCode
+                        }
+                        continue
+                    }
+
+                    $filteredOutput.Add($text) | Out-Null
+                    Write-Log -Level "NOTE" -Message "$text"
+                }
+            }
+
+            if ($TimeoutSeconds -gt 0 -and ((Get-Date) - $startedAt).TotalSeconds -ge $TimeoutSeconds) {
+                $timedOut = $true
+                try { $process.Kill() } catch {}
+                break
+            }
+
+            Start-Sleep -Milliseconds 300
+        }
+
+        try { $process.WaitForExit() } catch {}
+        $exitCode = if ($timedOut) { 124 } else { $process.ExitCode }
+    } finally {
+        foreach ($entry in @(
+            [pscustomobject]@{ Path = $stdoutPath; Count = $stdoutCount },
+            [pscustomobject]@{ Path = $stderrPath; Count = $stderrCount }
+        )) {
+            $tail = Read-AppendedLogLines -Path $entry.Path -KnownLineCount $entry.Count
+            foreach ($line in $tail.Lines) {
+                if ($null -eq $line) {
+                    continue
+                }
+
+                $text = "$line"
+                if ($text.TrimStart() -like "$exitMarker*") {
+                    $rawValue = $text.Substring($text.IndexOf($exitMarker) + $exitMarker.Length).Trim()
+                    $parsedExitCode = 0
+                    if ([int]::TryParse($rawValue, [ref]$parsedExitCode)) {
+                        $exitCode = $parsedExitCode
+                    }
+                    continue
+                }
+
+                $filteredOutput.Add($text) | Out-Null
+                Write-Log -Level "NOTE" -Message "$text"
+            }
+
+            if (Test-Path -LiteralPath $entry.Path) {
+                Remove-Item -LiteralPath $entry.Path -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
+    return [pscustomobject]@{
+        ExitCode = $exitCode
+        Output   = @($filteredOutput)
+        TimedOut = $timedOut
+    }
+}
+
+function Get-DefaultInstallState {
+    return [ordered]@{
+        schemaVersion         = 1
+        locale                = "zh-CN"
+        channel               = "latest"
+        installMode           = "auto"
+        installMethod         = "bundle"
+        mirror                = "auto"
+        artifactBaseUrl       = [Environment]::GetEnvironmentVariable("OPENCLAW_ARTIFACT_BASE_URL")
+        architecture          = Get-SystemArchitecture
+        installedVersion      = $null
+        lastKnownGoodVersion  = $null
+        lastHealthState       = "unknown"
+        dataRoot              = $script:Context.DataRoot
+        bundleRoot            = Join-Path $script:Context.DataRoot "bundles"
+        sourceRoot            = Join-Path $script:Context.DataRoot "source"
+        toolRoot              = Join-Path $script:Context.DataRoot "tools"
+        wrapperDir            = $script:Context.WrapperDir
+        wrapperPath           = Join-Path $script:Context.WrapperDir "openclaw.cmd"
+        supportDir            = $script:Context.SupportRoot
+        coreInstallerPath     = Join-Path $script:Context.SupportRoot "install-windows-core.ps1"
+        maintenanceScriptPath = Join-Path $script:Context.SupportRoot "OpenClaw-Maintenance.ps1"
+        licenseExecutablePath = Join-Path $script:Context.WrapperDir "OpenClaw-License.exe"
+        licenseStatePath      = Join-Path $script:Context.DataRoot "license-state.json"
+        licenseStatus         = "unknown"
+        licenseApiBaseUrl     = [Environment]::GetEnvironmentVariable("OPENCLAW_LICENSE_API_BASE_URL")
+        licenseProduct        = "windows-open"
+        runtimeControlMode    = "none"
+        lastLicenseCheckAt    = $null
+        commandType           = $null
+        commandTarget         = $null
+        portableNodeDir       = $null
+        companionCommands     = @()
+    }
+}
+
+function Resolve-InstallState {
+    Ensure-InstallContextBound
+
+    $state = Get-DefaultInstallState
+    $parsed = Read-JsonFileSafe -Path $script:Context.StatePath
+
+    if ($null -ne $parsed) {
+        foreach ($property in $parsed.PSObject.Properties) {
+            $state[$property.Name] = $property.Value
+        }
+    }
+
+    $stateDataRoot = Resolve-InstallRootFromBasePath -BasePath "$($state.dataRoot)"
+    if (-not [string]::IsNullOrWhiteSpace($stateDataRoot)) {
+        $currentScore = Get-InstallRootScore -Root $script:Context.DataRoot
+        $stateScore = Get-InstallRootScore -Root $stateDataRoot
+        if ($stateScore -gt $currentScore) {
+            Set-InstallContextRoot -Root $stateDataRoot
+        } else {
+            $state.dataRoot = $script:Context.DataRoot
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace("$($state.dataRoot)")) {
+        $state.dataRoot = $script:Context.DataRoot
+    }
+    if ([string]::IsNullOrWhiteSpace("$($state.bundleRoot)")) {
+        $state.bundleRoot = Join-Path $state.dataRoot "bundles"
+    }
+    if ([string]::IsNullOrWhiteSpace("$($state.sourceRoot)")) {
+        $state.sourceRoot = Join-Path $state.dataRoot "source"
+    }
+    if ([string]::IsNullOrWhiteSpace("$($state.toolRoot)")) {
+        $state.toolRoot = Join-Path $state.dataRoot "tools"
+    }
+
+    if ([string]::IsNullOrWhiteSpace("$($state.wrapperDir)")) {
+        $state.wrapperDir = $script:Context.WrapperDir
+    }
+    if ([string]::IsNullOrWhiteSpace("$($state.wrapperPath)")) {
+        $state.wrapperPath = Join-Path $state.wrapperDir "openclaw.cmd"
+    }
+    if ([string]::IsNullOrWhiteSpace("$($state.supportDir)")) {
+        $state.supportDir = $script:Context.SupportRoot
+    }
+    if ([string]::IsNullOrWhiteSpace("$($state.coreInstallerPath)")) {
+        $state.coreInstallerPath = Join-Path $state.supportDir "install-windows-core.ps1"
+    }
+    if ([string]::IsNullOrWhiteSpace("$($state.maintenanceScriptPath)")) {
+        $state.maintenanceScriptPath = Join-Path $state.supportDir "OpenClaw-Maintenance.ps1"
+    }
+    if ([string]::IsNullOrWhiteSpace("$($state.licenseExecutablePath)")) {
+        $state.licenseExecutablePath = Join-Path $state.wrapperDir "OpenClaw-License.exe"
+    }
+    if ([string]::IsNullOrWhiteSpace("$($state.licenseStatePath)")) {
+        $state.licenseStatePath = Join-Path $script:Context.DataRoot "license-state.json"
+    }
+    if ([string]::IsNullOrWhiteSpace("$($state.architecture)")) {
+        $state.architecture = Get-SystemArchitecture
+    }
+    if ([string]::IsNullOrWhiteSpace("$($state.channel)")) {
+        $state.channel = "latest"
+    }
+    if ("$($state.channel)".ToLowerInvariant() -eq "stable") {
+        $state.channel = "latest"
+    }
+    if ([string]::IsNullOrWhiteSpace("$($state.installMode)")) {
+        $state.installMode = "auto"
+    }
+    if ([string]::IsNullOrWhiteSpace("$($state.installMethod)")) {
+        $state.installMethod = "bundle"
+    }
+    if ([string]::IsNullOrWhiteSpace("$($state.mirror)")) {
+        $state.mirror = "auto"
+    }
+    if ([string]::IsNullOrWhiteSpace("$($state.locale)")) {
+        $state.locale = "zh-CN"
+    }
+    if ([string]::IsNullOrWhiteSpace("$($state.lastHealthState)")) {
+        $state.lastHealthState = "unknown"
+    }
+    if ([string]::IsNullOrWhiteSpace("$($state.licenseStatus)")) {
+        $state.licenseStatus = "unknown"
+    }
+    if ([string]::IsNullOrWhiteSpace("$($state.runtimeControlMode)")) {
+        $state.runtimeControlMode = "none"
+    }
+    if ([string]::IsNullOrWhiteSpace("$($state.licenseProduct)")) {
+        if ("$($state.runtimeControlMode)".ToLowerInvariant() -eq "server-enforced") {
+            $state.licenseProduct = "windows-licensed"
+        } else {
+            $state.licenseProduct = "windows-open"
+        }
+    }
+
+    $state = Sync-InstallStateFromDiscoveredAssets -State $state
+    Set-InstallContextRoot -Root $state.dataRoot
+    $script:Context.State = [pscustomobject]$state
+    return $script:Context.State
+}
+
+function Persist-InstallState {
+    param(
+        [string]$InstalledVersion = $null,
+        [switch]$MarkHealthy,
+        [string]$HealthState = $null
+    )
+
+    $state = Resolve-InstallState
+    $payload = [ordered]@{}
+    foreach ($property in $state.PSObject.Properties) {
+        $payload[$property.Name] = $property.Value
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($InstalledVersion)) {
+        $payload.installedVersion = $InstalledVersion
+        if ($MarkHealthy) {
+            $payload.lastKnownGoodVersion = $InstalledVersion
+            if ([string]::IsNullOrWhiteSpace($HealthState)) {
+                $HealthState = "healthy"
+            }
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace("$($payload.installMethod)")) {
+        $payload.installMethod = "bundle"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($HealthState)) {
+        $payload.lastHealthState = $HealthState
+    } elseif ([string]::IsNullOrWhiteSpace("$($payload.lastHealthState)")) {
+        $payload.lastHealthState = "unknown"
+    }
+
+    $payload.dataRoot = Get-StateProperty -State $state -Name "dataRoot" -Default $script:Context.DataRoot
+    $payload.bundleRoot = Get-StateProperty -State $state -Name "bundleRoot" -Default (Join-Path $payload.dataRoot "bundles")
+    $payload.sourceRoot = Get-StateProperty -State $state -Name "sourceRoot" -Default (Join-Path $payload.dataRoot "source")
+    $payload.toolRoot = Get-StateProperty -State $state -Name "toolRoot" -Default (Join-Path $payload.dataRoot "tools")
+    $payload.wrapperPath = Join-Path (Get-StateProperty -State $state -Name "wrapperDir" -Default $script:Context.WrapperDir) "openclaw.cmd"
+    $payload.supportDir = Get-StateProperty -State $state -Name "supportDir" -Default $script:Context.SupportRoot
+    $payload.coreInstallerPath = Get-StateProperty -State $state -Name "coreInstallerPath" -Default (Join-Path $payload.supportDir "install-windows-core.ps1")
+    $payload.maintenanceScriptPath = Get-StateProperty -State $state -Name "maintenanceScriptPath" -Default (Join-Path $payload.supportDir "OpenClaw-Maintenance.ps1")
+    $payload.licenseExecutablePath = Get-StateProperty -State $state -Name "licenseExecutablePath" -Default (Join-Path (Get-StateProperty -State $state -Name "wrapperDir" -Default $script:Context.WrapperDir) "OpenClaw-License.exe")
+    $payload.licenseStatePath = Get-StateProperty -State $state -Name "licenseStatePath" -Default (Join-Path $script:Context.DataRoot "license-state.json")
+    $payload.runtimeControlMode = Get-StateProperty -State $state -Name "runtimeControlMode" -Default "none"
+    $payload.licenseProduct = Get-StateProperty -State $state -Name "licenseProduct" -Default $(if ("$($payload.runtimeControlMode)".ToLowerInvariant() -eq "server-enforced") { "windows-licensed" } else { "windows-open" })
+    $payload.updatedAt = (Get-Date).ToString("o")
+
+    Ensure-Directory -Path ([IO.Path]::GetDirectoryName($script:Context.StatePath))
+    Save-JsonFile -Path $script:Context.StatePath -Object ([pscustomobject]$payload)
+    $script:Context.State = [pscustomobject]$payload
+}
+
+function Resolve-LastHealthStateForExitCode {
+    param([int]$Code)
+
+    $state = Resolve-InstallState
+    $existing = Get-StateProperty -State $state -Name "lastHealthState" -Default "unknown"
+
+    switch ($Code) {
+        0 { return "healthy" }
+        10 { return "needs-attention" }
+        20 { return $existing }
+        30 { return "reinstall-required" }
+        default { return "unhealthy" }
+    }
+}
+
+function Get-WrapperBootstrapBlock {
+    param([string]$PortableNodeDir)
+
+    if ([string]::IsNullOrWhiteSpace($PortableNodeDir)) {
+        $PortableNodeDir = "$env:SystemDrive\__openclaw_no_portable_node__"
+    }
+
+    return @"
+set "OPENCLAW_SYSTEM_ROOT=%SystemRoot%"
+if not defined OPENCLAW_SYSTEM_ROOT set "OPENCLAW_SYSTEM_ROOT=%WINDIR%"
+if not defined OPENCLAW_SYSTEM_ROOT set "OPENCLAW_SYSTEM_ROOT=C:\Windows"
+if exist "%OPENCLAW_SYSTEM_ROOT%\System32" set "PATH=%OPENCLAW_SYSTEM_ROOT%\System32;%OPENCLAW_SYSTEM_ROOT%;%OPENCLAW_SYSTEM_ROOT%\System32\Wbem;%OPENCLAW_SYSTEM_ROOT%\System32\WindowsPowerShell\v1.0;%PATH%"
+if defined LOCALAPPDATA if exist "%LOCALAPPDATA%\Microsoft\WindowsApps" set "PATH=%LOCALAPPDATA%\Microsoft\WindowsApps;%PATH%"
+if exist "%OPENCLAW_SYSTEM_ROOT%\System32\cmd.exe" set "ComSpec=%OPENCLAW_SYSTEM_ROOT%\System32\cmd.exe"
+if exist "$PortableNodeDir\node.exe" set "PATH=$PortableNodeDir;%PATH%"
+if exist "$PortableNodeDir\node.exe" set "OPENCLAW_NODE=$PortableNodeDir\node.exe"
+if not defined OPENCLAW_NODE set "OPENCLAW_NODE=node"
+"@
+}
+
+function Get-LicenseBootstrapBlock {
+    if (-not (Test-LicenseGateEnabled)) {
+        return ""
+    }
+
+    $licenseHelperPath = Get-StateProperty -State (Resolve-InstallState) -Name "licenseExecutablePath" -Default (Join-Path $script:Context.WrapperDir "OpenClaw-License.exe")
+
+    return @"
+set "OPENCLAW_LICENSE_HELPER=$licenseHelperPath"
+set "OPENCLAW_LICENSE_ENV=%TEMP%\openclaw-license-%RANDOM%%RANDOM%.cmd"
+if not exist "%OPENCLAW_LICENSE_HELPER%" (
+  echo OpenClaw license helper is missing. 1>&2
+  exit /b 45
+)
+"%OPENCLAW_LICENSE_HELPER%" check --mode cli --interactive --emit-env-cmd > "%OPENCLAW_LICENSE_ENV%"
+set "OPENCLAW_LICENSE_EXIT=%ERRORLEVEL%"
+if not "%OPENCLAW_LICENSE_EXIT%"=="0" (
+  if exist "%OPENCLAW_LICENSE_ENV%" del /f /q "%OPENCLAW_LICENSE_ENV%" >nul 2>nul
+  exit /b %OPENCLAW_LICENSE_EXIT%
+)
+call "%OPENCLAW_LICENSE_ENV%"
+if exist "%OPENCLAW_LICENSE_ENV%" del /f /q "%OPENCLAW_LICENSE_ENV%" >nul 2>nul
+"@
+}
+
+function Resolve-LicenseHelperPath {
+    $state = Resolve-InstallState
+    $candidates = @(
+        (Get-StateProperty -State $state -Name "licenseExecutablePath"),
+        (Join-Path (Get-StateProperty -State $state -Name "wrapperDir" -Default $script:Context.WrapperDir) "OpenClaw-License.exe"),
+        (Join-Path $script:Context.WrapperDir "OpenClaw-License.exe")
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate) {
+            return $candidate
+        }
+    }
+
+    return $null
+}
+
+function Test-LicenseGateEnabled {
+    return $false
+}
+
+function Test-LicenseAccess {
+    param(
+        [string]$ModeName
+    )
+
+    if (-not (Test-LicenseGateEnabled)) {
+        Write-Log -Level "INFO" -Message "License gate is disabled for the current runtime mode."
+        return [pscustomobject]@{
+            Allowed  = $true
+            ExitCode = 0
+            Output   = @()
+        }
+    }
+
+    $modeValue = if ([string]::IsNullOrWhiteSpace($ModeName)) { "start" } else { $ModeName.ToLowerInvariant() }
+    $licenseHelperPath = Resolve-LicenseHelperPath
+    if ([string]::IsNullOrWhiteSpace($licenseHelperPath)) {
+        Write-Log -Level "ERROR" -Message "The OpenClaw license helper was not found."
+        return [pscustomobject]@{
+            Allowed  = $false
+            ExitCode = 45
+        }
+    }
+
+    $arguments = @("check", "--mode", $modeValue, "--interactive", "--json")
+    Write-Log -Level "INFO" -Message ("Running license gate: {0} {1}" -f $licenseHelperPath, ($arguments -join " "))
+    $result = Invoke-ProcessCapture -FilePath $licenseHelperPath -Arguments $arguments -TimeoutSeconds 600 -HideWindow
+
+    $exitCode = if ($result.TimedOut) { 124 } else { $result.ExitCode }
+    $allowed = (-not $result.TimedOut -and $result.ExitCode -eq 0)
+    return [pscustomobject]@{
+        Allowed  = $allowed
+        ExitCode = $exitCode
+        Output   = @($result.Output)
+    }
+}
+
+function Write-CommandWrapper {
+    param(
+        [string]$Name,
+        [string]$Type,
+        [string]$TargetPath,
+        [string]$PortableNodeDir
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Name) -or [string]::IsNullOrWhiteSpace($Type) -or [string]::IsNullOrWhiteSpace($TargetPath)) {
+        return $false
+    }
+
+    if (-not (Test-Path -LiteralPath $TargetPath)) {
+        Write-Log -Level "WARN" -Message ("Cannot rebuild {0}.cmd because the target is missing: {1}" -f $Name, $TargetPath)
+        return $false
+    }
+
+    $wrapperPath = Join-Path (Get-StateProperty -State (Resolve-InstallState) -Name "wrapperDir" -Default $script:Context.WrapperDir) ("{0}.cmd" -f $Name)
+    Ensure-Directory -Path ([IO.Path]::GetDirectoryName($wrapperPath))
+    $bootstrap = Get-WrapperBootstrapBlock -PortableNodeDir $PortableNodeDir
+    $licenseBootstrap = Get-LicenseBootstrapBlock
+
+    if ($Type -eq "node") {
+        $wrapper = @"
+@echo off
+setlocal
+$bootstrap
+$licenseBootstrap
+"%OPENCLAW_NODE%" "$TargetPath" %*
+exit /b %ERRORLEVEL%
+"@
+    } else {
+        $wrapper = @"
+@echo off
+setlocal
+$bootstrap
+$licenseBootstrap
+call "$TargetPath" %*
+exit /b %ERRORLEVEL%
+"@
+    }
+
+    Ensure-Directory -Path $script:Context.WrapperDir
+    Set-Content -Path $wrapperPath -Value $wrapper -Encoding ASCII -NoNewline
+    Write-Log -Level "INFO" -Message ("Rebuilt wrapper: {0}" -f $wrapperPath)
+    return (Test-Path -LiteralPath $wrapperPath)
+}
+
+function Find-FirstFileRecursively {
+    param(
+        [string]$Root,
+        [string]$Filter
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Root) -or [string]::IsNullOrWhiteSpace($Filter)) {
+        return $null
+    }
+
+    if (-not (Test-Path -LiteralPath $Root -PathType Container)) {
+        return $null
+    }
+
+    try {
+        return Get-ChildItem -Path $Root -Filter $Filter -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+    } catch {
+        return $null
+    }
+}
+
+function Find-BundleCliEntrypoint {
+    param([string]$Root)
+
+    if ([string]::IsNullOrWhiteSpace($Root) -or -not (Test-Path -LiteralPath $Root -PathType Container)) {
+        return $null
+    }
+
+    try {
+        return Get-ChildItem -Path $Root -Filter "openclaw.mjs" -File -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '\\node_modules\\openclaw\\openclaw\.mjs$' } |
+            Select-Object -First 1
+    } catch {
+        return $null
+    }
+}
+
+function Find-SourceCliEntrypoint {
+    param([string]$Root)
+
+    if ([string]::IsNullOrWhiteSpace($Root) -or -not (Test-Path -LiteralPath $Root -PathType Container)) {
+        return $null
+    }
+
+    try {
+        return Get-ChildItem -Path $Root -Filter "entry.js" -File -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '\\dist\\entry\.js$' } |
+            Select-Object -First 1
+    } catch {
+        return $null
+    }
+}
+
+function Add-CommandDescriptorCandidate {
+    param(
+        [System.Collections.Generic.List[object]]$List,
+        [string]$Type,
+        [string]$TargetPath
+    )
+
+    if ($null -eq $List -or [string]::IsNullOrWhiteSpace($Type) -or [string]::IsNullOrWhiteSpace($TargetPath)) {
+        return
+    }
+
+    foreach ($existing in $List) {
+        if ([string]::Equals("$($existing.Type)", $Type, [System.StringComparison]::OrdinalIgnoreCase) -and
+            [string]::Equals("$($existing.Target)", $TargetPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return
+        }
+    }
+
+    $List.Add([pscustomobject]@{
+        Type   = $Type
+        Target = $TargetPath
+    }) | Out-Null
+}
+
+function Resolve-DirectCliPathFromCommand {
+    param([string]$CommandPath)
+
+    if ([string]::IsNullOrWhiteSpace($CommandPath) -or -not (Test-Path -LiteralPath $CommandPath -PathType Leaf)) {
+        return $null
+    }
+
+    $commandDir = Split-Path -Path $CommandPath -Parent
+    $candidates = New-Object System.Collections.Generic.List[string]
+    Add-UniqueString -List $candidates -Value (Join-Path $commandDir "node_modules\openclaw\openclaw.mjs")
+
+    try {
+        $content = Get-Content -LiteralPath $CommandPath -Raw -ErrorAction Stop
+        $patterns = @(
+            'node_modules\\openclaw\\[^"\r\n]+\.mjs',
+            'dist\\entry\.js'
+        )
+        foreach ($pattern in $patterns) {
+            $match = [regex]::Match($content, $pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+            if ($match.Success) {
+                Add-UniqueString -List $candidates -Value (Join-Path $commandDir $match.Value)
+            }
+        }
+    } catch {}
+
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return $candidate
+        }
+    }
+
+    return $null
+}
+
+function Resolve-CommandDescriptorFromWrapper {
+    param([string]$WrapperPath)
+
+    if ([string]::IsNullOrWhiteSpace($WrapperPath) -or -not (Test-Path -LiteralPath $WrapperPath -PathType Leaf)) {
+        return $null
+    }
+
+    try {
+        $content = Get-Content -LiteralPath $WrapperPath -Raw -ErrorAction Stop
+        $nodeMatch = [regex]::Match($content, 'OPENCLAW_NODE%"\s+"(?<target>[^"]+)"\s+%\*', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        if ($nodeMatch.Success) {
+            return [pscustomobject]@{
+                Type   = "node"
+                Target = $nodeMatch.Groups["target"].Value.Trim()
+            }
+        }
+
+        $cmdMatch = [regex]::Match($content, 'call\s+"(?<target>[^"]+)"\s+%\*', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        if ($cmdMatch.Success) {
+            return [pscustomobject]@{
+                Type   = "cmd"
+                Target = $cmdMatch.Groups["target"].Value.Trim()
+            }
+        }
+    } catch {}
+
+    return $null
+}
+
+function Get-CommandDiscoveryRoots {
+    param([object]$State)
+
+    $roots = New-Object System.Collections.Generic.List[string]
+    Add-UniqueString -List $roots -Value (Get-StateProperty -State $State -Name "dataRoot")
+    Add-UniqueString -List $roots -Value $script:Context.DataRoot
+    Add-UniqueString -List $roots -Value (Resolve-InstallRootFromBasePath -BasePath (Get-StateProperty -State $State -Name "wrapperPath"))
+    Add-UniqueString -List $roots -Value (Resolve-InstallRootFromBasePath -BasePath (Get-StateProperty -State $State -Name "supportDir"))
+    Add-UniqueString -List $roots -Value (Resolve-InstallRootFromBasePath -BasePath (Get-StateProperty -State $State -Name "maintenanceScriptPath"))
+    Add-UniqueString -List $roots -Value (Resolve-InstallRootFromBasePath -BasePath (Get-StateProperty -State $State -Name "coreInstallerPath"))
+    Add-UniqueString -List $roots -Value (Resolve-InstallRootFromBasePath -BasePath (Get-StateProperty -State $State -Name "commandTarget"))
+    Add-UniqueString -List $roots -Value (Resolve-InstallRootFromBasePath -BasePath $InvokerPath)
+
+    return $roots
+}
+
+function Resolve-PortableNodeDirForTarget {
+    param(
+        [object]$State,
+        [string]$TargetPath
+    )
+
+    $candidates = New-Object System.Collections.Generic.List[string]
+    Add-UniqueString -List $candidates -Value (Get-StateProperty -State $State -Name "portableNodeDir")
+
+    if (-not [string]::IsNullOrWhiteSpace($TargetPath)) {
+        $cursor = Split-Path -Path $TargetPath -Parent
+        for ($depth = 0; $depth -lt 8 -and -not [string]::IsNullOrWhiteSpace($cursor); $depth++) {
+            if (Test-Path -LiteralPath (Join-Path $cursor "node.exe") -PathType Leaf) {
+                Add-UniqueString -List $candidates -Value $cursor
+                break
+            }
+
+            $parent = Split-Path -Path $cursor -Parent
+            if ([string]::Equals($parent, $cursor, [System.StringComparison]::OrdinalIgnoreCase)) {
+                break
+            }
+            $cursor = $parent
+        }
+    }
+
+    $searchRoots = New-Object System.Collections.Generic.List[string]
+    Add-UniqueString -List $searchRoots -Value (Get-StateProperty -State $State -Name "toolRoot")
+    Add-UniqueString -List $searchRoots -Value (Get-StateProperty -State $State -Name "bundleRoot")
+    foreach ($root in (Get-CommandDiscoveryRoots -State $State)) {
+        Add-UniqueString -List $searchRoots -Value (Join-Path $root "tools")
+        Add-UniqueString -List $searchRoots -Value (Join-Path $root "bundles")
+    }
+
+    foreach ($searchRoot in $searchRoots) {
+        $nodeExe = Find-FirstFileRecursively -Root $searchRoot -Filter "node.exe"
+        if ($nodeExe) {
+            Add-UniqueString -List $candidates -Value (Split-Path -Path $nodeExe.FullName -Parent)
+        }
+    }
+
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath (Join-Path $candidate "node.exe") -PathType Leaf) {
+            return $candidate
+        }
+    }
+
+    return $null
+}
+
+function Resolve-DiscoveredCommandDescriptor {
+    param([object]$State)
+
+    $candidates = New-Object System.Collections.Generic.List[object]
+    $commandType = (Get-StateProperty -State $State -Name "commandType")
+    $commandTarget = (Get-StateProperty -State $State -Name "commandTarget")
+
+    if ($commandType -eq "node") {
+        Add-CommandDescriptorCandidate -List $candidates -Type "node" -TargetPath $commandTarget
+    } elseif ($commandType -eq "cmd") {
+        $directCli = Resolve-DirectCliPathFromCommand -CommandPath $commandTarget
+        Add-CommandDescriptorCandidate -List $candidates -Type "node" -TargetPath $directCli
+        Add-CommandDescriptorCandidate -List $candidates -Type "cmd" -TargetPath $commandTarget
+    }
+
+    $wrapperCandidates = @(
+        (Get-StateProperty -State $State -Name "wrapperPath"),
+        $(if (-not [string]::IsNullOrWhiteSpace((Get-StateProperty -State $State -Name "wrapperDir"))) { Join-Path (Get-StateProperty -State $State -Name "wrapperDir") "openclaw.cmd" } else { $null }),
+        (Join-Path $script:Context.WrapperDir "openclaw.cmd")
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+
+    foreach ($wrapperPath in $wrapperCandidates) {
+        $descriptor = Resolve-CommandDescriptorFromWrapper -WrapperPath $wrapperPath
+        if ($null -eq $descriptor) {
+            continue
+        }
+
+        if ($descriptor.Type -eq "cmd") {
+            $directCli = Resolve-DirectCliPathFromCommand -CommandPath $descriptor.Target
+            Add-CommandDescriptorCandidate -List $candidates -Type "node" -TargetPath $directCli
+        }
+
+        Add-CommandDescriptorCandidate -List $candidates -Type $descriptor.Type -TargetPath $descriptor.Target
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($env:APPDATA)) {
+        $npmCommandPath = Join-Path $env:APPDATA "npm\openclaw.cmd"
+        $npmCliPath = Resolve-DirectCliPathFromCommand -CommandPath $npmCommandPath
+        Add-CommandDescriptorCandidate -List $candidates -Type "node" -TargetPath $npmCliPath
+        Add-CommandDescriptorCandidate -List $candidates -Type "cmd" -TargetPath $npmCommandPath
+    }
+
+    $explicitBundleRoot = Get-StateProperty -State $State -Name "bundleRoot"
+    $explicitSourceRoot = Get-StateProperty -State $State -Name "sourceRoot"
+    $bundleCli = Find-BundleCliEntrypoint -Root $explicitBundleRoot
+    if ($bundleCli) {
+        Add-CommandDescriptorCandidate -List $candidates -Type "node" -TargetPath $bundleCli.FullName
+    }
+    $sourceEntry = Find-SourceCliEntrypoint -Root $explicitSourceRoot
+    if ($sourceEntry) {
+        Add-CommandDescriptorCandidate -List $candidates -Type "node" -TargetPath $sourceEntry.FullName
+    }
+
+    foreach ($root in (Get-CommandDiscoveryRoots -State $State)) {
+        $bundleRoot = Join-Path $root "bundles"
+        $sourceRoot = Join-Path $root "source"
+
+        $bundleCliCandidate = Find-BundleCliEntrypoint -Root $bundleRoot
+        if ($bundleCliCandidate) {
+            Add-CommandDescriptorCandidate -List $candidates -Type "node" -TargetPath $bundleCliCandidate.FullName
+        }
+
+        $sourceEntryCandidate = Find-SourceCliEntrypoint -Root $sourceRoot
+        if ($sourceEntryCandidate) {
+            Add-CommandDescriptorCandidate -List $candidates -Type "node" -TargetPath $sourceEntryCandidate.FullName
+        }
+    }
+
+    foreach ($candidate in $candidates) {
+        if ($candidate.Type -eq "node") {
+            if (-not (Test-Path -LiteralPath $candidate.Target -PathType Leaf)) {
+                continue
+            }
+
+            $portableNodeDir = Resolve-PortableNodeDirForTarget -State $State -TargetPath $candidate.Target
+            if (-not [string]::IsNullOrWhiteSpace($portableNodeDir) -or (Get-Command node -ErrorAction SilentlyContinue)) {
+                return [pscustomobject]@{
+                    Type            = "node"
+                    Target          = $candidate.Target
+                    PortableNodeDir = $portableNodeDir
+                }
+            }
+        }
+
+        if ($candidate.Type -eq "cmd" -and (Test-Path -LiteralPath $candidate.Target -PathType Leaf)) {
+            return [pscustomobject]@{
+                Type            = "cmd"
+                Target          = $candidate.Target
+                PortableNodeDir = (Resolve-PortableNodeDirForTarget -State $State -TargetPath $candidate.Target)
+            }
+        }
+    }
+
+    return $null
+}
+
+function Sync-InstallStateFromDiscoveredAssets {
+    param([object]$State)
+
+    if ($null -eq $State) {
+        return $null
+    }
+
+    $state.dataRoot = $script:Context.DataRoot
+    $state.bundleRoot = Join-Path $script:Context.DataRoot "bundles"
+    $state.sourceRoot = Join-Path $script:Context.DataRoot "source"
+    $state.toolRoot = Join-Path $script:Context.DataRoot "tools"
+    $state.supportDir = $script:Context.SupportRoot
+    $state.wrapperDir = $script:Context.WrapperDir
+    $state.wrapperPath = Join-Path $script:Context.WrapperDir "openclaw.cmd"
+    $state.coreInstallerPath = Join-Path $script:Context.SupportRoot "install-windows-core.ps1"
+    $state.maintenanceScriptPath = Join-Path $script:Context.SupportRoot "OpenClaw-Maintenance.ps1"
+
+    $descriptor = Resolve-DiscoveredCommandDescriptor -State $State
+    if ($descriptor) {
+        $state.commandType = $descriptor.Type
+        $state.commandTarget = $descriptor.Target
+        $state.portableNodeDir = $descriptor.PortableNodeDir
+    }
+
+    return $state
+}
+
+function Restore-WrappersFromState {
+    $state = Resolve-InstallState
+    $state = Sync-InstallStateFromDiscoveredAssets -State $state
+    $commandType = Get-StateProperty -State $state -Name "commandType"
+    $commandTarget = Get-StateProperty -State $state -Name "commandTarget"
+    $portableNodeDir = Get-StateProperty -State $state -Name "portableNodeDir"
+
+    if ([string]::IsNullOrWhiteSpace("$commandType") -or [string]::IsNullOrWhiteSpace("$commandTarget")) {
+        Write-Log -Level "WARN" -Message "Install state does not contain enough information to rebuild wrappers."
+        return $false
+    }
+
+    $rebuiltOpenClaw = Write-CommandWrapper -Name "openclaw" -Type "$commandType" -TargetPath "$commandTarget" -PortableNodeDir "$portableNodeDir"
+    $companions = Get-StateProperty -State $state -Name "companionCommands" -Default @()
+    foreach ($command in @($companions)) {
+        $name = Get-StateProperty -State $command -Name "name"
+        $type = Get-StateProperty -State $command -Name "type"
+        $targetPath = Get-StateProperty -State $command -Name "target"
+        if ([string]::IsNullOrWhiteSpace("$name") -or [string]::IsNullOrWhiteSpace("$type") -or [string]::IsNullOrWhiteSpace("$targetPath")) {
+            continue
+        }
+
+        [void](Write-CommandWrapper -Name "$name" -Type "$type" -TargetPath "$targetPath" -PortableNodeDir "$portableNodeDir")
+    }
+
+    if ($rebuiltOpenClaw) {
+        Persist-InstallState
+    }
+
+    return $rebuiltOpenClaw
+}
+
+function Resolve-WrapperPath {
+    $state = Resolve-InstallState
+    $exeDir = $null
+    if (-not [string]::IsNullOrWhiteSpace($script:Context.InvokerPath)) {
+        $exeDir = Split-Path -Path $script:Context.InvokerPath -Parent
+    }
+
+    $candidates = @(
+        (Get-StateProperty -State $state -Name "wrapperPath"),
+        $(if (-not [string]::IsNullOrWhiteSpace((Get-StateProperty -State $state -Name "wrapperDir"))) { Join-Path (Get-StateProperty -State $state -Name "wrapperDir") "openclaw.cmd" } else { $null }),
+        (Join-Path $script:Context.WrapperDir "openclaw.cmd"),
+        $(if (-not [string]::IsNullOrWhiteSpace($exeDir)) { Join-Path $exeDir "openclaw.cmd" } else { $null }),
+        $(if (-not [string]::IsNullOrWhiteSpace($env:APPDATA)) { Join-Path $env:APPDATA "npm\openclaw.cmd" } else { $null })
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate) {
+            $script:Context.WrapperPath = $candidate
+            return $candidate
+        }
+    }
+
+    if (Restore-WrappersFromState) {
+        foreach ($candidate in $candidates) {
+            if (Test-Path -LiteralPath $candidate) {
+                $script:Context.WrapperPath = $candidate
+                return $candidate
+            }
+        }
+    }
+
+    $script:Context.WrapperPath = $null
+    return $null
+}
+
+function Invoke-OpenClaw {
+    param(
+        [string[]]$Arguments,
+        [int]$TimeoutSeconds = 0
+    )
+
+    $wrapperPath = Resolve-WrapperPath
+    if ([string]::IsNullOrWhiteSpace($wrapperPath) -or -not (Test-Path -LiteralPath $wrapperPath)) {
+        throw "OpenClaw wrapper is missing."
+    }
+
+    Write-Log -Level "INFO" -Message ("Executing openclaw {0}" -f ($Arguments -join " "))
+    return Invoke-CmdFileCapture -FilePath $wrapperPath -Arguments $Arguments -TimeoutSeconds $TimeoutSeconds
+}
+
+function Test-OpenClawCommandSupport {
+    param([string[]]$Arguments)
+
+    try {
+        $probeArguments = @($Arguments)
+        if (-not ($probeArguments -contains "--help")) {
+            $probeArguments += "--help"
+        }
+
+        $result = Invoke-OpenClaw -Arguments $probeArguments -TimeoutSeconds 20
+        if ($result.ExitCode -eq 0) {
+            return $true
+        }
+
+        $joined = ($result.Output -join "`n")
+        if ($joined -match "Unknown command" -or $joined -match "Unknown option" -or $joined -match "Did you mean") {
+            return $false
+        }
+    } catch {
+        Write-Log -Level "WARN" -Message ("Capability probe failed for '{0}': {1}" -f ($Arguments -join " "), $_.Exception.Message)
+    }
+
+    return $false
+}
+
+function Resolve-Capabilities {
+    $script:Context.Capabilities.DaemonStatusJson = Test-OpenClawCommandSupport -Arguments @("daemon", "status", "--json")
+    $script:Context.Capabilities.StatusDeep = Test-OpenClawCommandSupport -Arguments @("status", "--deep")
+    $script:Context.Capabilities.StatusAll = Test-OpenClawCommandSupport -Arguments @("status", "--all")
+    $script:Context.Capabilities.HealthJson = Test-OpenClawCommandSupport -Arguments @("health", "--json", "--timeout", "1000")
+    $script:Context.Capabilities.GatewayStatusRequireRpc = Test-OpenClawCommandSupport -Arguments @("gateway", "status", "--json", "--require-rpc")
+    $script:Context.Capabilities.GatewayStatusJson = Test-OpenClawCommandSupport -Arguments @("gateway", "status", "--json")
+    $script:Context.Capabilities.GatewayStatus = Test-OpenClawCommandSupport -Arguments @("gateway", "status")
+    $script:Context.Capabilities.GatewayInstall = Test-OpenClawCommandSupport -Arguments @("gateway", "install", "--force")
+    $script:Context.Capabilities.GatewayStart = Test-OpenClawCommandSupport -Arguments @("gateway", "start")
+    $script:Context.Capabilities.GatewayStop = Test-OpenClawCommandSupport -Arguments @("gateway", "stop")
+    $script:Context.Capabilities.GatewayRestart = Test-OpenClawCommandSupport -Arguments @("gateway", "restart")
+    $script:Context.Capabilities.DoctorRepair = Test-OpenClawCommandSupport -Arguments @("doctor", "--repair")
+    $script:Context.Capabilities.DoctorNonInteractive = Test-OpenClawCommandSupport -Arguments @("doctor", "--non-interactive")
+    $script:Context.Capabilities.Dashboard = Test-OpenClawCommandSupport -Arguments @("dashboard")
+
+    Write-Log -Level "INFO" -Message ("Capabilities: {0}" -f (($script:Context.Capabilities.GetEnumerator() | ForEach-Object { "{0}={1}" -f $_.Key, $_.Value }) -join ", "))
+}
+
+function Get-NormalizedReleaseVersion {
+    param([string]$VersionText)
+
+    if ([string]::IsNullOrWhiteSpace($VersionText)) {
+        return $null
+    }
+
+    $match = [regex]::Match($VersionText, '\d+(?:\.\d+)+')
+    if (-not $match.Success) {
+        return $null
+    }
+
+    return $match.Value.Trim('.')
+}
+
+function Get-InstalledVersion {
+    try {
+        $result = Invoke-OpenClaw -Arguments @("--version") -TimeoutSeconds 45
+        if ($result.TimedOut -or $result.ExitCode -ne 0) {
+            return $null
+        }
+
+        $line = $result.Output | Select-Object -First 1
+        if ([string]::IsNullOrWhiteSpace("$line")) {
+            return $null
+        }
+
+        $rawVersion = "$line".Trim()
+        return [pscustomobject]@{
+            RawVersion        = $rawVersion
+            NormalizedVersion = Get-NormalizedReleaseVersion -VersionText $rawVersion
+        }
+    } catch {
+        Write-Log -Level "WARN" -Message ("Version check failed: {0}" -f $_.Exception.Message)
+        return $null
+    }
+}
+
+function Get-DaemonStatus {
+    param(
+        [switch]$EmitUiStatus
+    )
+
+    if (-not $script:Context.Capabilities.DaemonStatusJson) {
+        Write-Log -Level "INFO" -Message "The installed CLI does not support openclaw daemon status --json."
+        return $null
+    }
+
+    if ($EmitUiStatus) {
+        Write-UiStatus -Level "info" -Message "Checking the Gateway background service..."
+    }
+
+    try {
+        $result = Invoke-OpenClaw -Arguments @("daemon", "status", "--json") -TimeoutSeconds 45
+        if ($result.TimedOut -or $result.ExitCode -ne 0) {
+            Write-Log -Level "WARN" -Message ("openclaw daemon status --json did not complete cleanly (timedOut={0}, exitCode={1})." -f $result.TimedOut, $result.ExitCode)
+            return $null
+        }
+
+        $statusJson = ($result.Output -join "`n").Trim()
+        if ([string]::IsNullOrWhiteSpace($statusJson)) {
+            Write-Log -Level "WARN" -Message "openclaw daemon status --json returned empty output."
+            return $null
+        }
+
+        $parsed = $statusJson | ConvertFrom-Json -ErrorAction Stop
+        $loadedProperty = $null
+        if ($parsed -and $parsed.PSObject.Properties["service"] -and $parsed.service) {
+            $loadedProperty = $parsed.service.PSObject.Properties["loaded"]
+        }
+
+        if ($loadedProperty) {
+            $loaded = [bool]$loadedProperty.Value
+            Write-Log -Level "INFO" -Message ("Daemon service loaded={0}" -f $loaded)
+            if ($EmitUiStatus) {
+                if ($loaded) {
+                    Write-UiStatus -Level "info" -Message "The Gateway background service is loaded."
+                } else {
+                    Write-UiStatus -Level "warn" -Message "The Gateway background service is not loaded."
+                }
+            }
+        } else {
+            Write-Log -Level "WARN" -Message "Daemon status JSON does not include service.loaded."
+        }
+
+        return $parsed
+    } catch {
+        Write-Log -Level "WARN" -Message ("Failed to parse daemon status JSON: {0}" -f $_.Exception.Message)
+        return $null
+    }
+}
+
+function Test-GatewayServiceLoaded {
+    param(
+        [object]$DaemonStatus = $null
+    )
+
+    if (-not $script:Context.Capabilities.DaemonStatusJson) {
+        return $false
+    }
+
+    $status = $DaemonStatus
+    if ($null -eq $status) {
+        $status = Get-DaemonStatus
+    }
+    if ($null -eq $status) {
+        return $false
+    }
+
+    try {
+        if ($status.PSObject.Properties["service"] -and $status.service -and $status.service.PSObject.Properties["loaded"]) {
+            return [bool]$status.service.loaded
+        }
+    } catch {}
+
+    return $false
+}
+
+function Test-Healthy {
+    if ($script:Context.Capabilities.HealthJson) {
+        $result = Invoke-OpenClaw -Arguments @("health", "--json", "--timeout", "10000") -TimeoutSeconds 30
+        return (-not $result.TimedOut -and $result.ExitCode -eq 0)
+    }
+
+    if ($script:Context.Capabilities.GatewayStatusRequireRpc) {
+        $result = Invoke-OpenClaw -Arguments @("gateway", "status", "--json", "--require-rpc") -TimeoutSeconds 30
+        return (-not $result.TimedOut -and $result.ExitCode -eq 0)
+    }
+
+    if ($script:Context.Capabilities.GatewayStatusJson) {
+        $result = Invoke-OpenClaw -Arguments @("gateway", "status", "--json") -TimeoutSeconds 30
+        return (-not $result.TimedOut -and $result.ExitCode -eq 0)
+    }
+
+    if ($script:Context.Capabilities.StatusDeep) {
+        $result = Invoke-OpenClaw -Arguments @("status", "--deep") -TimeoutSeconds 30
+        return (-not $result.TimedOut -and $result.ExitCode -eq 0)
+    }
+
+    if ($script:Context.Capabilities.StatusAll) {
+        $result = Invoke-OpenClaw -Arguments @("status", "--all") -TimeoutSeconds 30
+        return (-not $result.TimedOut -and $result.ExitCode -eq 0)
+    }
+
+    if ($script:Context.Capabilities.GatewayStatus) {
+        $result = Invoke-OpenClaw -Arguments @("gateway", "status") -TimeoutSeconds 30
+        return (-not $result.TimedOut -and $result.ExitCode -eq 0)
+    }
+
+    return $false
+}
+
+function Get-CommandProcessorPath {
+    $systemRoot = $env:SystemRoot
+    if ([string]::IsNullOrWhiteSpace($systemRoot)) {
+        $systemRoot = $env:WINDIR
+    }
+    if ([string]::IsNullOrWhiteSpace($systemRoot)) {
+        $systemRoot = "C:\Windows"
+    }
+
+    $commandProcessor = Join-Path $systemRoot "System32\cmd.exe"
+    if (-not (Test-Path -LiteralPath $commandProcessor)) {
+        return "cmd.exe"
+    }
+
+    return $commandProcessor
+}
+
+function Get-GatewayReadinessSnapshot {
+    param(
+        [switch]$EmitUiStatus
+    )
+
+    $daemonStatus = $null
+    $serviceLoadedKnown = $false
+    $serviceLoaded = $false
+
+    if ($script:Context.Capabilities.DaemonStatusJson) {
+        $daemonStatus = Get-DaemonStatus -EmitUiStatus:$EmitUiStatus
+        $serviceLoadedKnown = $true
+        $serviceLoaded = Test-GatewayServiceLoaded -DaemonStatus $daemonStatus
+    }
+
+    $healthy = Test-Healthy
+
+    return [pscustomobject]@{
+        DaemonStatus        = $daemonStatus
+        ServiceLoadedKnown  = $serviceLoadedKnown
+        ServiceLoaded       = $serviceLoaded
+        Healthy             = $healthy
+        TransientHealthy    = ($healthy -and $serviceLoadedKnown -and -not $serviceLoaded)
+        PersistentSatisfied = ($healthy -and ((-not $serviceLoadedKnown) -or $serviceLoaded))
+    }
+}
+
+function Wait-For-PersistentGateway {
+    param(
+        [int]$Attempts = 4,
+        [int]$DelaySeconds = 4
+    )
+
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        Write-Log -Level "INFO" -Message ("Persistent readiness probe attempt {0}/{1}" -f $attempt, $Attempts)
+        $snapshot = Get-GatewayReadinessSnapshot
+        if ($snapshot.PersistentSatisfied) {
+            return $true
+        }
+
+        if ($attempt -lt $Attempts) {
+            Start-Sleep -Seconds $DelaySeconds
+        }
+    }
+
+    return $false
+}
+
+function Collect-StatusDiagnostics {
+    if ($script:Context.Capabilities.GatewayStatusRequireRpc) {
+        [void](Invoke-OpenClaw -Arguments @("gateway", "status", "--json", "--require-rpc") -TimeoutSeconds 60)
+    }
+
+    if ($script:Context.Capabilities.GatewayStatusJson) {
+        [void](Invoke-OpenClaw -Arguments @("gateway", "status", "--json") -TimeoutSeconds 60)
+    } elseif ($script:Context.Capabilities.GatewayStatus) {
+        [void](Invoke-OpenClaw -Arguments @("gateway", "status") -TimeoutSeconds 60)
+    }
+
+    if ($script:Context.Capabilities.StatusDeep) {
+        [void](Invoke-OpenClaw -Arguments @("status", "--deep") -TimeoutSeconds 60)
+    } elseif ($script:Context.Capabilities.StatusAll) {
+        [void](Invoke-OpenClaw -Arguments @("status", "--all") -TimeoutSeconds 60)
+    }
+}
+
+function Wait-For-Healthy {
+    param(
+        [int]$Attempts = 4,
+        [int]$DelaySeconds = 4
+    )
+
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        Write-Log -Level "INFO" -Message ("Health probe attempt {0}/{1}" -f $attempt, $Attempts)
+        if (Test-Healthy) {
+            return $true
+        }
+
+        if ($attempt -lt $Attempts) {
+            Start-Sleep -Seconds $DelaySeconds
+        }
+    }
+
+    return $false
+}
+
+function Invoke-GatewayLifecycle {
+    param(
+        [ValidateSet("start", "stop", "restart")]
+        [string]$Action,
+        [int]$TimeoutSeconds = 120
+    )
+
+    $capabilityName = switch ($Action) {
+        "start" { "GatewayStart" }
+        "stop" { "GatewayStop" }
+        default { "GatewayRestart" }
+    }
+
+    if (-not $script:Context.Capabilities[$capabilityName]) {
+        Write-Log -Level "WARN" -Message ("The installed CLI does not support the gateway action: {0}" -f $Action)
+        return [pscustomobject]@{
+            ExitCode = 1
+            Output   = @()
+            TimedOut = $false
+        }
+    }
+
+    return Invoke-OpenClaw -Arguments @("gateway", $Action) -TimeoutSeconds $TimeoutSeconds
+}
+
+function Start-Or-RestartGateway {
+    param(
+        [switch]$RequirePersistentService
+    )
+
+    $attempts = @()
+    $daemonStatus = Get-DaemonStatus
+    $serviceLoaded = Test-GatewayServiceLoaded -DaemonStatus $daemonStatus
+
+    if ($script:Context.Capabilities.GatewayStart) {
+        $attempts += "start"
+    }
+    if ($script:Context.Capabilities.GatewayRestart) {
+        $attempts += "restart"
+    }
+
+    if ($attempts.Count -eq 0) {
+        return $false
+    }
+
+    foreach ($action in $attempts | Select-Object -Unique) {
+        $result = Invoke-GatewayLifecycle -Action $action -TimeoutSeconds 120
+        if ($result.TimedOut -or $result.ExitCode -ne 0) {
+            continue
+        }
+
+        $ready = if ($RequirePersistentService) {
+            Wait-For-PersistentGateway -Attempts 4 -DelaySeconds 4
+        } else {
+            Wait-For-Healthy -Attempts 4 -DelaySeconds 4
+        }
+
+        if ($ready) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Refresh-GatewayServiceIfLoaded {
+    param(
+        [string]$StatusMessage = "The Gateway service is loaded but appears unhealthy. Refreshing it...",
+        [string]$LogMessage = "Gateway service is loaded but unhealthy; refreshing via gateway install --force."
+    )
+
+    $daemonStatus = Get-DaemonStatus
+    if (-not (Test-GatewayServiceLoaded -DaemonStatus $daemonStatus)) {
+        Write-Log -Level "INFO" -Message "Gateway service is not loaded; skipping loaded-service refresh."
+        return $false
+    }
+
+    Write-UiStatus -Level "warn" -Message $StatusMessage
+    Write-Log -Level "INFO" -Message $LogMessage
+    if (-not (Run-GatewayInstallForce)) {
+        return $false
+    }
+
+    $lifecycleResult = $null
+    if ($script:Context.Capabilities.GatewayStart) {
+        $lifecycleResult = Invoke-GatewayLifecycle -Action "start" -TimeoutSeconds 120
+    } elseif ($script:Context.Capabilities.GatewayRestart) {
+        $lifecycleResult = Invoke-GatewayLifecycle -Action "restart" -TimeoutSeconds 120
+    }
+
+    if ($null -eq $lifecycleResult) {
+        return (Wait-For-PersistentGateway -Attempts 4 -DelaySeconds 4)
+    }
+
+    return (-not $lifecycleResult.TimedOut -and $lifecycleResult.ExitCode -eq 0 -and (Wait-For-PersistentGateway -Attempts 4 -DelaySeconds 4))
+}
+
+function Run-Doctor {
+    $fallbackMessage = "Official Doctor repair is unavailable. Falling back to safe Doctor checks..."
+
+    if ($script:Context.Capabilities.DoctorRepair) {
+        Write-UiStatus -Level "info" -Message "Running the official Doctor repair flow..."
+        Write-Log -Level "INFO" -Message "Trying official repair via openclaw doctor --repair."
+        $result = Invoke-OpenClaw -Arguments @("doctor", "--repair") -TimeoutSeconds 300
+        if (-not $result.TimedOut -and $result.ExitCode -eq 0) {
+            return $true
+        }
+
+        Write-Log -Level "WARN" -Message ("Official doctor repair did not complete cleanly (timedOut={0}, exitCode={1})." -f $result.TimedOut, $result.ExitCode)
+        $fallbackMessage = "Official Doctor repair did not complete cleanly. Falling back to safe Doctor checks..."
+    } else {
+        Write-Log -Level "WARN" -Message "The installed CLI does not support openclaw doctor --repair."
+    }
+
+    if (-not $script:Context.Capabilities.DoctorNonInteractive) {
+        Write-Log -Level "WARN" -Message "The installed CLI does not support openclaw doctor --non-interactive."
+        return $false
+    }
+
+    Write-UiStatus -Level "warn" -Message $fallbackMessage
+    Write-Log -Level "INFO" -Message "Falling back to openclaw doctor --non-interactive."
+    $fallbackResult = Invoke-OpenClaw -Arguments @("doctor", "--non-interactive") -TimeoutSeconds 240
+    return (-not $fallbackResult.TimedOut -and $fallbackResult.ExitCode -eq 0)
+}
+
+function Run-GatewayInstallForce {
+    if (-not $script:Context.Capabilities.GatewayInstall) {
+        Write-Log -Level "WARN" -Message "The installed CLI does not support openclaw gateway install --force."
+        return $false
+    }
+
+    Write-UiStatus -Level "info" -Message "Reinstalling the Gateway service..."
+    $result = Invoke-OpenClaw -Arguments @("gateway", "install", "--force") -TimeoutSeconds 240
+    return (-not $result.TimedOut -and $result.ExitCode -eq 0)
+}
+
+function Open-Onboard {
+    $wrapperPath = Resolve-WrapperPath
+    if ([string]::IsNullOrWhiteSpace($wrapperPath) -or -not (Test-Path -LiteralPath $wrapperPath)) {
+        Write-Log -Level "WARN" -Message "Cannot open onboarding because the wrapper is unavailable."
+        return $false
+    }
+
+    $commandProcessor = Get-CommandProcessorPath
+
+    $commandLine = ('"{0}" onboard --install-daemon' -f $wrapperPath)
+    Write-UiStatus -Level "warn" -Message "Manual configuration is required. Opening onboarding..."
+    Write-Log -Level "INFO" -Message ("Launching onboarding: {0} /d /s /c {1}" -f $commandProcessor, $commandLine)
+    Start-Process -FilePath $commandProcessor -ArgumentList @("/d", "/s", "/c", $commandLine) -WorkingDirectory $script:Context.DataRoot | Out-Null
+    return $true
+}
+
+function Get-FirstHttpUrlFromText {
+    param([string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return $null
+    }
+
+    $match = [regex]::Match($Text, 'https?://[^\s"''<>]+', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if ($match.Success) {
+        return $match.Value.Trim()
+    }
+
+    return $null
+}
+
+function Try-ParseHttpUri {
+    param([string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return $null
+    }
+
+    $uri = $null
+    if (-not [System.Uri]::TryCreate($Value.Trim(), [System.UriKind]::Absolute, [ref]$uri)) {
+        return $null
+    }
+
+    if ($uri.Scheme -ine "http" -and $uri.Scheme -ine "https") {
+        return $null
+    }
+
+    return $uri
+}
+
+function Format-OriginString {
+    param(
+        [string]$Scheme,
+        [string]$OriginHost,
+        [int]$Port
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Scheme) -or [string]::IsNullOrWhiteSpace($OriginHost)) {
+        return $null
+    }
+
+    $normalizedScheme = $Scheme.Trim().ToLowerInvariant()
+    $normalizedHost = $OriginHost.Trim()
+    if ($normalizedHost.StartsWith("[") -and $normalizedHost.EndsWith("]")) {
+        $normalizedHost = $normalizedHost.Substring(1, $normalizedHost.Length - 2)
+    }
+
+    if ($normalizedHost.Contains(":")) {
+        $normalizedHost = "[{0}]" -f $normalizedHost
+    }
+
+    $isDefaultPort =
+        (($normalizedScheme -eq "http") -and ($Port -eq 80)) -or
+        (($normalizedScheme -eq "https") -and ($Port -eq 443))
+
+    if ($Port -le 0 -or $isDefaultPort) {
+        return ("{0}://{1}" -f $normalizedScheme, $normalizedHost)
+    }
+
+    return ("{0}://{1}:{2}" -f $normalizedScheme, $normalizedHost, $Port)
+}
+
+function Get-OriginStringFromUri {
+    param([System.Uri]$Uri)
+
+    if ($null -eq $Uri) {
+        return $null
+    }
+
+    $port = if ($Uri.IsDefaultPort) {
+        if ($Uri.Scheme -ieq "https") { 443 } else { 80 }
+    } else {
+        $Uri.Port
+    }
+
+    return (Format-OriginString -Scheme $Uri.Scheme -OriginHost $Uri.Host -Port $port)
+}
+
+function Test-LoopbackHost {
+    param([string]$OriginHost)
+
+    if ([string]::IsNullOrWhiteSpace($OriginHost)) {
+        return $false
+    }
+
+    $normalizedHost = $OriginHost.Trim().TrimStart("[").TrimEnd("]").ToLowerInvariant()
+    return @("127.0.0.1", "localhost", "::1") -contains $normalizedHost
+}
+
+function Test-StringCollectionContains {
+    param(
+        [string[]]$Values,
+        [string]$Candidate
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Candidate)) {
+        return $false
+    }
+
+    foreach ($value in @($Values)) {
+        if ([string]::Equals("$value".Trim(), $Candidate.Trim(), [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Test-OriginWildcardConfigured {
+    param([string[]]$Origins)
+
+    foreach ($origin in @($Origins)) {
+        if ("$origin".Trim() -eq "*") {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Convert-ConfigOutputToStringList {
+    param([object[]]$Output)
+
+    $text = (@($Output) | ForEach-Object { "$_" } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join "`n"
+    $text = $text.Trim()
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return @()
+    }
+
+    $normalized = $text.ToLowerInvariant()
+    if ($normalized -eq "undefined" -or $normalized -eq "null") {
+        return @()
+    }
+
+    $values = New-Object System.Collections.Generic.List[string]
+    try {
+        $parsed = $text | ConvertFrom-Json -ErrorAction Stop
+        if ($parsed -is [System.Collections.IEnumerable] -and -not ($parsed -is [string])) {
+            foreach ($item in @($parsed)) {
+                Add-UniqueString -List $values -Value "$item"
+            }
+
+            return @($values.ToArray())
+        }
+
+        Add-UniqueString -List $values -Value "$parsed"
+        return @($values.ToArray())
+    } catch {
+        if ($text.StartsWith("[") -and $text.EndsWith("]")) {
+            Write-Log -Level "WARN" -Message ("Failed to parse gateway.controlUi.allowedOrigins as JSON: {0}" -f $_.Exception.Message)
+            return @()
+        }
+
+        Add-UniqueString -List $values -Value $text
+        return @($values.ToArray())
+    }
+}
+
+function Get-ControlUiAllowedOrigins {
+    try {
+        $result = Invoke-OpenClaw -Arguments @("config", "get", "gateway.controlUi.allowedOrigins") -TimeoutSeconds 30
+        if ($result.TimedOut) {
+            Write-Log -Level "WARN" -Message "Timed out while reading gateway.controlUi.allowedOrigins."
+            return [pscustomobject]@{
+                Success = $false
+                Origins = @()
+            }
+        }
+
+        if ($result.ExitCode -ne 0) {
+            Write-Log -Level "INFO" -Message "gateway.controlUi.allowedOrigins is not configured yet or could not be read cleanly; treating it as empty."
+            return [pscustomobject]@{
+                Success = $true
+                Origins = @()
+            }
+        }
+
+        return [pscustomobject]@{
+            Success = $true
+            Origins = @(Convert-ConfigOutputToStringList -Output $result.Output)
+        }
+    } catch {
+        Write-Log -Level "WARN" -Message ("Failed to read gateway.controlUi.allowedOrigins: {0}" -f $_.Exception.Message)
+        return [pscustomobject]@{
+            Success = $false
+            Origins = @()
+        }
+    }
+}
+
+function Set-ControlUiAllowedOrigins {
+    param([string[]]$Origins)
+
+    $uniqueOrigins = New-Object System.Collections.Generic.List[string]
+    foreach ($origin in @($Origins)) {
+        Add-UniqueString -List $uniqueOrigins -Value $origin
+    }
+
+    if ($uniqueOrigins.Count -eq 0) {
+        return $false
+    }
+
+    $jsonValue = ConvertTo-Json -InputObject @($uniqueOrigins.ToArray()) -Compress
+    $result = Invoke-OpenClaw -Arguments @("config", "set", "gateway.controlUi.allowedOrigins", $jsonValue, "--strict-json") -TimeoutSeconds 60
+    if ($result.TimedOut) {
+        Write-Log -Level "WARN" -Message "Timed out while writing gateway.controlUi.allowedOrigins."
+        return $false
+    }
+
+    if ($result.ExitCode -ne 0) {
+        Write-Log -Level "WARN" -Message "openclaw config set gateway.controlUi.allowedOrigins returned a non-zero exit code."
+        return $false
+    }
+
+    Write-Log -Level "INFO" -Message ("Updated gateway.controlUi.allowedOrigins to: {0}" -f ($uniqueOrigins -join ", "))
+    return $true
+}
+
+function Get-DashboardRequiredOrigins {
+    param([string]$DashboardUrl)
+
+    $dashboardUri = Try-ParseHttpUri -Value $DashboardUrl
+    if ($null -eq $dashboardUri) {
+        return @()
+    }
+
+    $requiredOrigins = New-Object System.Collections.Generic.List[string]
+    Add-UniqueString -List $requiredOrigins -Value (Get-OriginStringFromUri -Uri $dashboardUri)
+
+    if (Test-LoopbackHost -OriginHost $dashboardUri.Host) {
+        $port = if ($dashboardUri.IsDefaultPort) {
+            if ($dashboardUri.Scheme -ieq "https") { 443 } else { 80 }
+        } else {
+            $dashboardUri.Port
+        }
+
+        foreach ($candidateHost in @("127.0.0.1", "localhost", "::1")) {
+            Add-UniqueString -List $requiredOrigins -Value (Format-OriginString -Scheme $dashboardUri.Scheme -OriginHost $candidateHost -Port $port)
+        }
+    }
+
+    return @($requiredOrigins.ToArray())
+}
+
+function Reload-GatewayAfterControlUiConfigChange {
+    Write-UiStatus -Level "info" -Message "Refreshing the Gateway to apply the Dashboard compatibility fix..."
+    Write-Log -Level "INFO" -Message "Reloading the Gateway after updating gateway.controlUi.allowedOrigins."
+
+    $snapshot = Get-GatewayReadinessSnapshot
+    $requirePersistent = $snapshot.ServiceLoadedKnown -and $snapshot.ServiceLoaded
+    $waitSucceeded = $false
+
+    if ($script:Context.Capabilities.GatewayRestart) {
+        $restartResult = Invoke-GatewayLifecycle -Action "restart" -TimeoutSeconds 150
+        if (-not $restartResult.TimedOut -and $restartResult.ExitCode -eq 0) {
+            $waitSucceeded = if ($requirePersistent) {
+                Wait-For-PersistentGateway -Attempts 5 -DelaySeconds 4
+            } else {
+                Wait-For-Healthy -Attempts 5 -DelaySeconds 4
+            }
+
+            if ($waitSucceeded) {
+                return $true
+            }
+        } else {
+            Write-Log -Level "WARN" -Message "gateway restart failed while applying the Dashboard origin compatibility fix."
+        }
+    }
+
+    if ($script:Context.Capabilities.GatewayStop -and $script:Context.Capabilities.GatewayStart) {
+        $stopResult = Invoke-GatewayLifecycle -Action "stop" -TimeoutSeconds 90
+        if (-not $stopResult.TimedOut) {
+            Start-Sleep -Seconds 2
+        }
+
+        $startResult = Invoke-GatewayLifecycle -Action "start" -TimeoutSeconds 150
+        if (-not $startResult.TimedOut -and $startResult.ExitCode -eq 0) {
+            $waitSucceeded = if ($requirePersistent) {
+                Wait-For-PersistentGateway -Attempts 5 -DelaySeconds 4
+            } else {
+                Wait-For-Healthy -Attempts 5 -DelaySeconds 4
+            }
+
+            if ($waitSucceeded) {
+                return $true
+            }
+        } else {
+            Write-Log -Level "WARN" -Message "gateway stop/start failed while applying the Dashboard origin compatibility fix."
+        }
+    }
+
+    if ($requirePersistent) {
+        $statusMessage = "Refreshing the Gateway service to apply the Dashboard compatibility fix..."
+        return (Refresh-GatewayServiceIfLoaded -StatusMessage $statusMessage -LogMessage "Refreshing the loaded Gateway service after updating gateway.controlUi.allowedOrigins.")
+    }
+
+    if ((-not $snapshot.Healthy) -or $script:Context.Capabilities.GatewayStop) {
+        return (Start-PersistentGatewayConsole)
+    }
+
+    return $false
+}
+
+function Ensure-DashboardOriginCompatibility {
+    param([string]$DashboardUrl)
+
+    $requiredOrigins = @(Get-DashboardRequiredOrigins -DashboardUrl $DashboardUrl)
+    if ($requiredOrigins.Count -eq 0) {
+        Write-Log -Level "INFO" -Message ("Dashboard URL does not require origin compatibility changes: {0}" -f $DashboardUrl)
+        return [pscustomobject]@{
+            Patched  = $false
+            Reloaded = $false
+        }
+    }
+
+    $allowedOriginsState = Get-ControlUiAllowedOrigins
+    if (-not $allowedOriginsState.Success) {
+        return [pscustomobject]@{
+            Patched  = $false
+            Reloaded = $false
+        }
+    }
+
+    if (Test-OriginWildcardConfigured -Origins $allowedOriginsState.Origins) {
+        Write-Log -Level "INFO" -Message "gateway.controlUi.allowedOrigins already contains '*'; skipping Dashboard compatibility patch."
+        return [pscustomobject]@{
+            Patched  = $false
+            Reloaded = $false
+        }
+    }
+
+    $missingOrigins = @()
+    foreach ($origin in $requiredOrigins) {
+        if (-not (Test-StringCollectionContains -Values $allowedOriginsState.Origins -Candidate $origin)) {
+            $missingOrigins += $origin
+        }
+    }
+
+    if ($missingOrigins.Count -eq 0) {
+        return [pscustomobject]@{
+            Patched  = $false
+            Reloaded = $false
+        }
+    }
+
+    Write-UiStatus -Level "info" -Message "Adding the Dashboard origin compatibility allowlist..."
+    Write-Log -Level "INFO" -Message ("Adding missing Dashboard origins: {0}" -f ($missingOrigins -join ", "))
+
+    $mergedOrigins = New-Object System.Collections.Generic.List[string]
+    foreach ($origin in @($allowedOriginsState.Origins + $requiredOrigins)) {
+        Add-UniqueString -List $mergedOrigins -Value $origin
+    }
+
+    if (-not (Set-ControlUiAllowedOrigins -Origins @($mergedOrigins.ToArray()))) {
+        return [pscustomobject]@{
+            Patched  = $false
+            Reloaded = $false
+        }
+    }
+
+    $reloaded = Reload-GatewayAfterControlUiConfigChange
+    if (-not $reloaded) {
+        Write-Log -Level "WARN" -Message "The Dashboard origin compatibility patch was written, but the Gateway refresh did not complete cleanly."
+    }
+
+    return [pscustomobject]@{
+        Patched  = $true
+        Reloaded = $reloaded
+    }
+}
+
+function Resolve-DashboardUrl {
+    if ($script:Context.Capabilities.Dashboard) {
+        try {
+            $result = Invoke-OpenClaw -Arguments @("dashboard", "--no-open") -TimeoutSeconds 45
+            if (-not $result.TimedOut -and $result.ExitCode -eq 0) {
+                $outputText = ($result.Output -join "`n").Trim()
+                $parsedUrl = Get-FirstHttpUrlFromText -Text $outputText
+                if (-not [string]::IsNullOrWhiteSpace($parsedUrl)) {
+                    return $parsedUrl
+                }
+            }
+        } catch {
+            Write-Log -Level "WARN" -Message ("Failed to resolve dashboard URL via CLI: {0}" -f $_.Exception.Message)
+        }
+    }
+
+    return "http://127.0.0.1:18789/"
+}
+
+function Open-DashboardAfterStart {
+    try {
+        $dashboardUrl = Resolve-DashboardUrl
+        if ([string]::IsNullOrWhiteSpace($dashboardUrl)) {
+            Write-Log -Level "WARN" -Message "Dashboard URL is empty; skipped opening browser."
+            return $false
+        }
+
+        $compatibilityResult = Ensure-DashboardOriginCompatibility -DashboardUrl $dashboardUrl
+        if ($compatibilityResult.Patched) {
+            Write-Log -Level "INFO" -Message ("Dashboard origin compatibility patch applied (reloaded={0})." -f $compatibilityResult.Reloaded)
+        }
+
+        Write-UiStatus -Level "info" -Message ("Opening dashboard: {0}" -f $dashboardUrl)
+        Write-Log -Level "INFO" -Message ("Opening dashboard in browser: {0}" -f $dashboardUrl)
+        Start-Process -FilePath $dashboardUrl | Out-Null
+        return $true
+    } catch {
+        Write-Log -Level "WARN" -Message ("Failed to open dashboard automatically: {0}" -f $_.Exception.Message)
+        return $false
+    }
+}
+
+function Ensure-OfficialGatewayPersistence {
+    param(
+        [string]$StatusMessage = "Gateway is not persistent yet. Installing the official background service..."
+    )
+
+    if (-not $script:Context.Capabilities.GatewayInstall) {
+        Write-Log -Level "WARN" -Message "Gateway install capability is unavailable; cannot normalize to a persistent background service."
+        return $false
+    }
+
+    Write-UiStatus -Level "warn" -Message $StatusMessage
+    Write-Log -Level "INFO" -Message "Attempting to normalize the Gateway into the official persistent background service."
+
+    if (-not (Run-GatewayInstallForce)) {
+        Write-Log -Level "WARN" -Message "gateway install --force failed while normalizing persistence."
+        return $false
+    }
+
+    if ($script:Context.Capabilities.DaemonStatusJson) {
+        $daemonStatus = Get-DaemonStatus -EmitUiStatus
+        if (-not (Test-GatewayServiceLoaded -DaemonStatus $daemonStatus)) {
+            Write-Log -Level "WARN" -Message "gateway install --force completed, but daemon status still reports service.loaded=false."
+            return $false
+        }
+    }
+
+    if (Start-Or-RestartGateway -RequirePersistentService) {
+        return $true
+    }
+
+    return (Wait-For-PersistentGateway -Attempts 5 -DelaySeconds 4)
+}
+
+function Start-PersistentGatewayConsole {
+    $wrapperPath = Resolve-WrapperPath
+    if ([string]::IsNullOrWhiteSpace($wrapperPath) -or -not (Test-Path -LiteralPath $wrapperPath)) {
+        Write-Log -Level "WARN" -Message "Cannot start persistent Gateway console because the wrapper is unavailable."
+        return $false
+    }
+
+    $supportDir = Get-StateProperty -State (Resolve-InstallState) -Name "supportDir" -Default $script:Context.SupportRoot
+    if ([string]::IsNullOrWhiteSpace($supportDir)) {
+        $supportDir = $script:Context.SupportRoot
+    }
+    Ensure-Directory -Path $supportDir
+
+    if ($script:Context.Capabilities.GatewayStop) {
+        Write-UiStatus -Level "warn" -Message "The official background service is not ready. Switching to a persistent console window..."
+        [void](Invoke-GatewayLifecycle -Action "stop" -TimeoutSeconds 60)
+        Start-Sleep -Seconds 2
+    }
+
+    $consoleScriptPath = Join-Path $supportDir "OpenClaw-Gateway-Persistent.cmd"
+    $scriptLines = @(
+        "@echo off",
+        "setlocal",
+        "chcp 65001 >nul",
+        "title OpenClaw Gateway Persistent Console",
+        "echo [OpenClaw] Persistent Gateway window opened.",
+        "echo [OpenClaw] Keep this window open to keep the Gateway online.",
+        "echo [OpenClaw] Close this window only when you want to stop the Gateway.",
+        "echo.",
+        ('call "{0}" gateway run' -f $wrapperPath),
+        "echo.",
+        "echo [OpenClaw] Gateway exited. Check the logs above.",
+        "pause"
+    )
+    [System.IO.File]::WriteAllText($consoleScriptPath, ($scriptLines -join "`r`n") + "`r`n", (New-Object System.Text.UTF8Encoding($true)))
+
+    $commandProcessor = Get-CommandProcessorPath
+    $commandLine = ('call "{0}"' -f $consoleScriptPath)
+    Write-Log -Level "INFO" -Message ("Launching persistent Gateway console: {0} /d /k {1}" -f $commandProcessor, $commandLine)
+    Start-Process -FilePath $commandProcessor -ArgumentList @("/d", "/k", $commandLine) -WorkingDirectory $script:Context.DataRoot -WindowStyle Normal | Out-Null
+
+    return (Wait-For-Healthy -Attempts 6 -DelaySeconds 4)
+}
+
+function Ensure-PersistentGatewayReady {
+    param(
+        [switch]$AllowConsoleFallback
+    )
+
+    $snapshot = Get-GatewayReadinessSnapshot -EmitUiStatus
+    Write-Log -Level "INFO" -Message ("Gateway readiness snapshot: healthy={0}, serviceLoadedKnown={1}, serviceLoaded={2}" -f $snapshot.Healthy, $snapshot.ServiceLoadedKnown, $snapshot.ServiceLoaded)
+    if ($snapshot.Healthy -and -not $snapshot.ServiceLoadedKnown) {
+        Write-Log -Level "INFO" -Message "Gateway is healthy, but daemon status is unavailable; treating current state as compatible."
+        return [pscustomobject]@{
+            Ready               = $true
+            UsedConsoleFallback = $false
+        }
+    }
+
+    if ($snapshot.Healthy -and $snapshot.ServiceLoadedKnown -and $snapshot.ServiceLoaded) {
+        return [pscustomobject]@{
+            Ready               = $true
+            UsedConsoleFallback = $false
+        }
+    }
+
+    if ($snapshot.TransientHealthy) {
+        Write-UiStatus -Level "warn" -Message "The Gateway is only running temporarily. Switching it to persistent mode..."
+        Write-Log -Level "WARN" -Message "Gateway is reachable but not running as a loaded background service."
+    }
+
+    if ($snapshot.ServiceLoadedKnown -and $snapshot.ServiceLoaded) {
+        Write-UiStatus -Level "warn" -Message "The Gateway background service is registered but not ready. Trying to start it..."
+        Write-Log -Level "WARN" -Message "Gateway service is registered but the Gateway is not healthy; trying gateway start/restart before reinstalling the service."
+        if (Start-Or-RestartGateway -RequirePersistentService) {
+            return [pscustomobject]@{
+                Ready               = $true
+                UsedConsoleFallback = $false
+            }
+        }
+
+        if (Refresh-GatewayServiceIfLoaded -StatusMessage "The Gateway service is loaded but unhealthy. Refreshing it..." -LogMessage "Gateway service is loaded but unhealthy; refreshing it before returning success.") {
+            return [pscustomobject]@{
+                Ready               = $true
+                UsedConsoleFallback = $false
+            }
+        }
+    } else {
+        if (Ensure-OfficialGatewayPersistence) {
+            return [pscustomobject]@{
+                Ready               = $true
+                UsedConsoleFallback = $false
+            }
+        }
+    }
+
+    if (Start-Or-RestartGateway -RequirePersistentService) {
+        return [pscustomobject]@{
+            Ready               = $true
+            UsedConsoleFallback = $false
+        }
+    }
+
+    $finalSnapshot = Get-GatewayReadinessSnapshot
+    $shouldUseConsoleFallback = $AllowConsoleFallback -and (-not $finalSnapshot.ServiceLoadedKnown -or -not $finalSnapshot.ServiceLoaded)
+    if ($shouldUseConsoleFallback -and (Start-PersistentGatewayConsole)) {
+        return [pscustomobject]@{
+            Ready               = $true
+            UsedConsoleFallback = $true
+        }
+    }
+
+    return [pscustomobject]@{
+        Ready               = $false
+        UsedConsoleFallback = $false
+    }
+}
+
+function Get-InstallerBaseUrl {
+    $baseUrl = [Environment]::GetEnvironmentVariable("OPENCLAW_INSTALLER_BASE_URL")
+    if ([string]::IsNullOrWhiteSpace($baseUrl)) {
+        $baseUrl = "https://raw.githubusercontent.com/736773174/openclaw-setup-cn/main"
+    }
+
+    return $baseUrl.TrimEnd("/")
+}
+
+function Resolve-InstallerCorePath {
+    $state = Resolve-InstallState
+    $supportDir = Get-StateProperty -State $state -Name "supportDir" -Default $script:Context.SupportRoot
+    $candidates = @(
+        (Get-StateProperty -State $state -Name "coreInstallerPath"),
+        $(if (-not [string]::IsNullOrWhiteSpace($supportDir)) { Join-Path $supportDir "install-windows-core.ps1" } else { $null }),
+        $(if (-not [string]::IsNullOrWhiteSpace($script:Context.InvokerPath)) { Join-Path (Split-Path -Path $script:Context.InvokerPath -Parent) "install-windows-core.ps1" } else { $null })
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate) {
+            return $candidate
+        }
+    }
+
+    $downloadPath = Join-Path $script:Context.TempRoot "install-windows-core.ps1"
+    try {
+        $url = "{0}/install-windows-core.ps1" -f (Get-InstallerBaseUrl)
+        Write-Log -Level "INFO" -Message ("Downloading installer core: {0}" -f $url)
+        Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $downloadPath -TimeoutSec 60 -ErrorAction Stop
+        return $downloadPath
+    } catch {
+        Write-Log -Level "WARN" -Message ("Failed to download installer core: {0}" -f $_.Exception.Message)
+        return $null
+    }
+}
+
+function Get-NpmRegistryCandidates {
+    $state = Resolve-InstallState
+    $mirror = (Get-StateProperty -State $state -Name "mirror" -Default "auto").ToLowerInvariant()
+    $customRegistry = [Environment]::GetEnvironmentVariable("OPENCLAW_CUSTOM_NPM_REGISTRY")
+
+    switch ($mirror) {
+        "official" { return @("https://registry.npmjs.org/") }
+        "china"    { return @("https://registry.npmmirror.com/") }
+        "custom"   {
+            if ([string]::IsNullOrWhiteSpace($customRegistry)) {
+                return @("https://registry.npmjs.org/")
+            }
+
+            return @($customRegistry)
+        }
+        default    { return @("https://registry.npmjs.org/", "https://registry.npmmirror.com/") }
+    }
+}
+
+function Compare-ReleaseVersions {
+    param(
+        [string]$Left,
+        [string]$Right
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Left) -and [string]::IsNullOrWhiteSpace($Right)) {
+        return 0
+    }
+    if ([string]::IsNullOrWhiteSpace($Left)) {
+        return -1
+    }
+    if ([string]::IsNullOrWhiteSpace($Right)) {
+        return 1
+    }
+
+    $normalizedLeft = Get-NormalizedReleaseVersion -VersionText $Left
+    $normalizedRight = Get-NormalizedReleaseVersion -VersionText $Right
+
+    if (-not [string]::IsNullOrWhiteSpace($normalizedLeft) -and -not [string]::IsNullOrWhiteSpace($normalizedRight)) {
+        try {
+        return ([version]$normalizedLeft).CompareTo([version]$normalizedRight)
+        } catch {}
+    }
+
+    return [string]::Compare($Left, $Right, $true)
+}
+
+function Convert-ManifestToRelease {
+    param(
+        [object]$Manifest,
+        [string]$Source,
+        [string]$Channel
+    )
+
+    $version = Get-StateProperty -State $Manifest -Name "version"
+    if ([string]::IsNullOrWhiteSpace("$version")) {
+        return $null
+    }
+
+    $packageTag = Get-StateProperty -State $Manifest -Name "packageTag"
+    if ([string]::IsNullOrWhiteSpace("$packageTag")) {
+        $packageTag = if ("$Channel".ToLowerInvariant() -eq "beta") { "beta" } else { "latest" }
+    }
+
+    return [pscustomobject]@{
+        Source     = $Source
+        Version    = "$version"
+        PackageTag = "$packageTag"
+    }
+}
+
+function Get-LocalSupportManifestCandidates {
+    $state = Resolve-InstallState
+    $channel = Get-StateProperty -State $state -Name "channel" -Default "stable"
+    $architecture = Get-StateProperty -State $state -Name "architecture" -Default (Get-SystemArchitecture)
+    $supportDir = Get-StateProperty -State $state -Name "supportDir" -Default $script:Context.SupportRoot
+
+    if ([string]::IsNullOrWhiteSpace("$supportDir")) {
+        return @()
+    }
+
+    $candidates = @(
+        (Join-Path $supportDir ("windows-{0}-{1}.json" -f $channel, $architecture)),
+        (Join-Path $supportDir ("windows-{0}-{1}-manifest.json" -f $channel, $architecture)),
+        (Join-Path $supportDir "manifest.json")
+    )
+
+    return @($candidates | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and (Test-Path -LiteralPath $_) } | Select-Object -Unique)
+}
+
+function Get-ArtifactManifestUrls {
+    $state = Resolve-InstallState
+    $channel = Get-StateProperty -State $state -Name "channel" -Default "stable"
+    $architecture = Get-StateProperty -State $state -Name "architecture" -Default (Get-SystemArchitecture)
+    $artifactBaseUrl = Get-StateProperty -State $state -Name "artifactBaseUrl"
+    $candidates = New-Object System.Collections.Generic.List[object]
+
+    if (-not [string]::IsNullOrWhiteSpace("$artifactBaseUrl")) {
+        $baseUrl = $artifactBaseUrl.TrimEnd("/")
+        $candidates.Add([pscustomobject]@{ Source = "artifact"; BaseUrl = $baseUrl }) | Out-Null
+    }
+
+    $installerBaseUrl = Get-InstallerBaseUrl
+    if (-not [string]::IsNullOrWhiteSpace("$installerBaseUrl")) {
+        $baseUrl = $installerBaseUrl.TrimEnd("/")
+        $candidates.Add([pscustomobject]@{ Source = "official"; BaseUrl = $baseUrl }) | Out-Null
+    }
+
+    $urls = New-Object System.Collections.Generic.List[object]
+    foreach ($candidate in ($candidates | Sort-Object Source, BaseUrl -Unique)) {
+        foreach ($url in @(
+            ("{0}/windows/{1}/{2}/manifest.json" -f $candidate.BaseUrl, $channel, $architecture),
+            ("{0}/{1}/{2}/manifest.json" -f $candidate.BaseUrl, $channel, $architecture),
+            ("{0}/manifests/windows-{1}-{2}.json" -f $candidate.BaseUrl, $channel, $architecture)
+        )) {
+            $urls.Add([pscustomobject]@{
+                Source = $candidate.Source
+                Url    = $url
+            }) | Out-Null
+        }
+    }
+
+    return @($urls | Sort-Object Source, Url -Unique)
+}
+
+function Resolve-TargetRelease {
+    $state = Resolve-InstallState
+    $channel = (Get-StateProperty -State $state -Name "channel" -Default "stable").ToLowerInvariant()
+    $currentVersionRaw = Get-StateProperty -State $state -Name "installedVersion"
+    $distTag = if ($channel -eq "beta") { "beta" } else { "latest" }
+    $url = "https://registry.npmjs.org/openclaw"
+
+    try {
+        Write-Log -Level "INFO" -Message ("Resolving update target from official source: {0} (dist-tag: {1})" -f $url, $distTag)
+        $packageMetadata = Invoke-RestMethod -UseBasicParsing -Uri $url -TimeoutSec 20 -ErrorAction Stop
+        $distTags = $packageMetadata.'dist-tags'
+        if ($null -eq $distTags) {
+            return $null
+        }
+
+        $version = $distTags.$distTag
+        if ([string]::IsNullOrWhiteSpace("$version")) {
+            return $null
+        }
+
+        $release = [pscustomobject]@{
+            Source     = "official-npm"
+            Version    = "$version"
+            PackageTag = $distTag
+        }
+
+        $comparison = Compare-ReleaseVersions -Left $release.Version -Right $currentVersionRaw
+        if ($comparison -lt 0) {
+            Write-Log -Level "WARN" -Message ("Official source returned an older version than the installed version: {0} < {1}" -f $release.Version, $currentVersionRaw)
+        }
+
+        return $release
+    } catch {
+        Write-Log -Level "WARN" -Message ("Official npm metadata query failed: {0}" -f $_.Exception.Message)
+        return $null
+    }
+}
+
+function Resolve-PowerShellExe {
+    $systemRoot = $env:SystemRoot
+    if ([string]::IsNullOrWhiteSpace($systemRoot)) {
+        $systemRoot = $env:WINDIR
+    }
+    if ([string]::IsNullOrWhiteSpace($systemRoot)) {
+        $systemRoot = "C:\Windows"
+    }
+
+    $candidate = Join-Path $systemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+    if (Test-Path -LiteralPath $candidate) {
+        return $candidate
+    }
+
+    return "powershell.exe"
+}
+
+function Invoke-InstallerUpdate {
+    $installerPath = Resolve-InstallerCorePath
+    if ([string]::IsNullOrWhiteSpace($installerPath) -or -not (Test-Path -LiteralPath $installerPath)) {
+        Write-Log -Level "ERROR" -Message "Installer core is unavailable."
+        return $false
+    }
+
+    $state = Resolve-InstallState
+    $parameters = @(
+        "-NoLogo",
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", $installerPath,
+        "-Locale", (Get-StateProperty -State $state -Name "locale" -Default "zh-CN"),
+        "-Channel", "latest",
+        "-InstallMode", "npm",
+        "-Mirror", (Get-StateProperty -State $state -Name "mirror" -Default "auto"),
+        "-InvokerRoot", (Get-StateProperty -State $state -Name "supportDir" -Default $script:Context.SupportRoot),
+        "-NoOnboard"
+    )
+    if (-not (Test-LicenseGateEnabled)) {
+        $parameters += "-NoLicenseGate"
+    }
+
+    Write-UiStatus -Level "info" -Message "Updating to the latest official OpenClaw version..."
+    Write-Log -Level "INFO" -Message ("Running latest-version update via installer core: {0} {1}" -f (Resolve-PowerShellExe), ($parameters -join " "))
+    $result = Invoke-ProcessCapture -FilePath (Resolve-PowerShellExe) -Arguments $parameters -TimeoutSeconds 3600 -HideWindow
+    return (-not $result.TimedOut -and $result.ExitCode -eq 0)
+}
+
+function Invoke-StartMode {
+    if (Test-LicenseGateEnabled) {
+        Write-UiPhase -Key "start.license" -Title "Checking the license" -Progress 5 -Message "Checking the local authorization state..."
+        $licenseResult = Test-LicenseAccess -ModeName "start"
+        if (-not $licenseResult.Allowed) {
+            Write-Log -Level "ERROR" -Message ("License gate denied start mode (exitCode={0})." -f $licenseResult.ExitCode)
+            return (Complete-Maintenance -Code $script:ExitCodes.NeedsAttention -Message "A valid OpenClaw authorization code is required before starting.")
+        }
+    } else {
+        Write-UiPhase -Key "start.prepare" -Title "Preparing startup" -Progress 5 -Message "Preparing the startup checks..."
+    }
+
+    Write-UiPhase -Key "start.environment" -Title "Checking the OpenClaw environment" -Progress 10 -Message "Checking the OpenClaw entrypoint and version..."
+    $wrapperPath = Resolve-WrapperPath
+    if ([string]::IsNullOrWhiteSpace($wrapperPath)) {
+        Write-Log -Level "ERROR" -Message "OpenClaw wrapper was not found."
+        return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired)
+    }
+
+    $installedVersion = Get-InstalledVersion
+    if ($null -eq $installedVersion -or [string]::IsNullOrWhiteSpace("$($installedVersion.NormalizedVersion)")) {
+        $rawVersion = if ($null -eq $installedVersion) { "<empty>" } else { $installedVersion.RawVersion }
+        Write-Log -Level "ERROR" -Message ("OpenClaw entrypoint looks broken. Raw version output: {0}" -f $rawVersion)
+        return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired)
+    }
+
+    Write-UiPhase -Key "start.gateway" -Title "Checking Gateway status" -Progress 25 -Message "Checking the current Gateway status..."
+    Resolve-Capabilities
+    $startupSnapshot = Get-GatewayReadinessSnapshot -EmitUiStatus
+    if ($startupSnapshot.Healthy) {
+        Write-Log -Level "INFO" -Message "Gateway is already healthy. Skipping restart flow and opening dashboard directly."
+        $refreshedInstalledVersion = Get-InstalledVersion
+        if ($null -ne $refreshedInstalledVersion -and -not [string]::IsNullOrWhiteSpace("$($refreshedInstalledVersion.NormalizedVersion)")) {
+            $installedVersion = $refreshedInstalledVersion
+        }
+        Write-UiPhase -Key "start.dashboard" -Title "Opening dashboard" -Progress 90 -Message "Gateway is already running. Opening the dashboard..."
+        Persist-InstallState -InstalledVersion $installedVersion.NormalizedVersion -MarkHealthy
+        [void](Open-DashboardAfterStart)
+        Write-UiPhase -Key "start.verify" -Title "Verifying chat readiness" -Progress 100 -Message "Start finished. Confirming chat readiness..."
+        return (Complete-Maintenance -Code $script:ExitCodes.Success -Message "Gateway is already running. Dashboard opened.")
+    }
+
+    Collect-StatusDiagnostics
+    Write-UiPhase -Key "start.restart" -Title "Starting or restarting the Gateway" -Progress 70 -Message "Trying to start or restart the Gateway..."
+    $readyResult = Ensure-PersistentGatewayReady -AllowConsoleFallback
+    if ($readyResult.Ready) {
+        $refreshedInstalledVersion = Get-InstalledVersion
+        if ($null -ne $refreshedInstalledVersion -and -not [string]::IsNullOrWhiteSpace("$($refreshedInstalledVersion.NormalizedVersion)")) {
+            $installedVersion = $refreshedInstalledVersion
+        }
+        Write-UiPhase -Key "start.verify" -Title "Verifying chat readiness" -Progress 100 -Message "Start finished. Confirming chat readiness..."
+        Persist-InstallState -InstalledVersion $installedVersion.NormalizedVersion -MarkHealthy
+        [void](Open-DashboardAfterStart)
+        if ($readyResult.UsedConsoleFallback) {
+            return (Complete-Maintenance -Code $script:ExitCodes.Success -Message "A persistent OpenClaw console window was opened. Keep it open to keep chatting.")
+        }
+
+        return (Complete-Maintenance -Code $script:ExitCodes.Success)
+    }
+
+    if (Open-Onboard) {
+        return (Complete-Maintenance -Code $script:ExitCodes.NeedsAttention)
+    }
+
+    return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired)
+}
+
+function Invoke-UpdateMode {
+    if (Test-LicenseGateEnabled) {
+        Write-UiPhase -Key "update.license" -Title "Checking the license" -Progress 3 -Message "Checking the local authorization state..."
+        $licenseResult = Test-LicenseAccess -ModeName "update"
+        if (-not $licenseResult.Allowed) {
+            Write-Log -Level "ERROR" -Message ("License gate denied update mode (exitCode={0})." -f $licenseResult.ExitCode)
+            return (Complete-Maintenance -Code $script:ExitCodes.NeedsAttention -Message "A valid OpenClaw authorization code is required before updating.")
+        }
+    } else {
+        Write-UiPhase -Key "update.prepare" -Title "Preparing update" -Progress 3 -Message "Preparing the update checks..."
+    }
+
+    Write-UiPhase -Key "update.read-state" -Title "Reading installation state" -Progress 5 -Message "Reading the current installation state..."
+    Resolve-InstallState | Out-Null
+
+    $currentVersion = $null
+    if (Resolve-WrapperPath) {
+        $currentVersion = Get-InstalledVersion
+        if ($null -ne $currentVersion -and -not [string]::IsNullOrWhiteSpace("$($currentVersion.NormalizedVersion)")) {
+            Resolve-Capabilities
+        }
+    }
+
+    Write-UiPhase -Key "update.resolve-target" -Title "Checking the target version" -Progress 15 -Message "Checking the target version for the current channel..."
+    $targetRelease = Resolve-TargetRelease
+    if ($null -eq $targetRelease -or [string]::IsNullOrWhiteSpace("$($targetRelease.Version)")) {
+        Write-Log -Level "ERROR" -Message "Could not resolve the target release for update."
+        return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired)
+    }
+
+    Write-Log -Level "INFO" -Message ("Current version: {0}" -f $(if ($null -eq $currentVersion -or [string]::IsNullOrWhiteSpace("$($currentVersion.RawVersion)")) { "<unknown>" } else { $currentVersion.RawVersion }))
+    if ($null -ne $currentVersion -and -not [string]::IsNullOrWhiteSpace("$($currentVersion.NormalizedVersion)")) {
+        Write-Log -Level "INFO" -Message ("Current normalized version: {0}" -f $currentVersion.NormalizedVersion)
+    }
+    Write-Log -Level "INFO" -Message ("Target version: {0} ({1})" -f $targetRelease.Version, $targetRelease.Source)
+
+    if ($null -ne $currentVersion -and -not [string]::IsNullOrWhiteSpace("$($currentVersion.NormalizedVersion)") -and (Compare-ReleaseVersions -Left $currentVersion.NormalizedVersion -Right $targetRelease.Version) -eq 0) {
+        Write-UiPhase -Key "update.verify" -Title "Verifying update result" -Progress 100 -Message "The current installation is already up to date."
+        $readyResult = Ensure-PersistentGatewayReady -AllowConsoleFallback
+        if ($readyResult.Ready) {
+            Persist-InstallState -InstalledVersion $currentVersion.NormalizedVersion -MarkHealthy
+            if ($readyResult.UsedConsoleFallback) {
+                return (Complete-Maintenance -Code $script:ExitCodes.NoChanges -Message "OpenClaw is already up to date, and a persistent console window was opened.")
+            }
+
+            return (Complete-Maintenance -Code $script:ExitCodes.NoChanges -Message "OpenClaw is already up to date, and chat readiness was confirmed.")
+        }
+
+        if (Open-Onboard) {
+            return (Complete-Maintenance -Code $script:ExitCodes.NeedsAttention)
+        }
+
+        return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired)
+    }
+
+    if ($script:Context.Capabilities.GatewayStop) {
+        Write-UiPhase -Key "update.stop-gateway" -Title "Stopping the Gateway" -Progress 25 -Message "Stopping the Gateway service..."
+        [void](Invoke-GatewayLifecycle -Action "stop" -TimeoutSeconds 120)
+    }
+
+    Write-UiPhase -Key "update.install" -Title "Installing the update" -Progress 75 -Message "Installing the update. Please wait..."
+    if (-not (Invoke-InstallerUpdate)) {
+        return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired)
+    }
+
+    if (-not (Resolve-WrapperPath)) {
+        Write-Log -Level "ERROR" -Message "OpenClaw wrapper is still missing after update."
+        return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired)
+    }
+
+    Resolve-Capabilities
+    $installedVersion = Get-InstalledVersion
+    if ($null -eq $installedVersion -or [string]::IsNullOrWhiteSpace("$($installedVersion.NormalizedVersion)")) {
+        $rawVersion = if ($null -eq $installedVersion) { "<empty>" } else { $installedVersion.RawVersion }
+        Write-Log -Level "ERROR" -Message ("Version verification failed after update. Raw version output: {0}" -f $rawVersion)
+        return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired)
+    }
+
+    Write-UiPhase -Key "update.restart" -Title "Restarting the Gateway" -Progress 90 -Message "Restarting the Gateway service..."
+    $readyResult = Ensure-PersistentGatewayReady -AllowConsoleFallback
+    if (-not $readyResult.Ready) {
+        Write-Log -Level "ERROR" -Message "Gateway persistence and health verification failed after update."
+        if (Open-Onboard) {
+            return (Complete-Maintenance -Code $script:ExitCodes.NeedsAttention)
+        }
+
+        return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired)
+    }
+
+    Write-UiPhase -Key "update.verify" -Title "Verifying update result" -Progress 100 -Message "Update finished. Confirming chat readiness..."
+    Persist-InstallState -InstalledVersion $installedVersion.NormalizedVersion -MarkHealthy
+    if ($readyResult.UsedConsoleFallback) {
+        return (Complete-Maintenance -Code $script:ExitCodes.Success -Message "The update finished, and a persistent OpenClaw console window was opened.")
+    }
+
+    return (Complete-Maintenance -Code $script:ExitCodes.Success)
+}
+
+function Invoke-RepairMode {
+    if (Test-LicenseGateEnabled) {
+        Write-UiPhase -Key "repair.license" -Title "Checking the license" -Progress 5 -Message "Checking the local authorization state..."
+        $licenseResult = Test-LicenseAccess -ModeName "repair"
+        if (-not $licenseResult.Allowed) {
+            Write-Log -Level "ERROR" -Message ("License gate denied repair mode (exitCode={0})." -f $licenseResult.ExitCode)
+            return (Complete-Maintenance -Code $script:ExitCodes.NeedsAttention -Message "A valid OpenClaw authorization code is required before repairing.")
+        }
+    } else {
+        Write-UiPhase -Key "repair.prepare" -Title "Preparing repair" -Progress 5 -Message "Preparing the repair checks..."
+    }
+
+    Write-UiPhase -Key "repair.entry" -Title "Checking the entrypoint and version" -Progress 10 -Message "Checking the OpenClaw wrapper and version..."
+    Resolve-InstallState | Out-Null
+
+    $wrapperPath = Resolve-WrapperPath
+    if ([string]::IsNullOrWhiteSpace($wrapperPath)) {
+        Write-Log -Level "ERROR" -Message "OpenClaw wrapper was not found and could not be rebuilt."
+        return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired)
+    }
+
+    $installedVersion = Get-InstalledVersion
+    if ($null -eq $installedVersion -or [string]::IsNullOrWhiteSpace("$($installedVersion.NormalizedVersion)")) {
+        $rawVersion = if ($null -eq $installedVersion) { "<empty>" } else { $installedVersion.RawVersion }
+        Write-Log -Level "ERROR" -Message ("Version check failed; the entrypoint still looks broken. Raw version output: {0}" -f $rawVersion)
+        return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired)
+    }
+
+    Write-UiPhase -Key "repair.collect" -Title "Collecting runtime status" -Progress 20 -Message "Collecting the current runtime status..."
+    Resolve-Capabilities
+    [void](Get-DaemonStatus -EmitUiStatus)
+    Collect-StatusDiagnostics
+
+    Write-UiPhase -Key "repair.restart" -Title "Restarting the Gateway" -Progress 35 -Message "Trying to restart the Gateway..."
+    $readyResult = Ensure-PersistentGatewayReady -AllowConsoleFallback
+    if ($readyResult.Ready) {
+        Write-UiPhase -Key "repair.verify" -Title "Verifying repair result" -Progress 100 -Message "Restart finished. Confirming Gateway health..."
+        Persist-InstallState -InstalledVersion $installedVersion.NormalizedVersion -MarkHealthy
+        if ($readyResult.UsedConsoleFallback) {
+            return (Complete-Maintenance -Code $script:ExitCodes.Success -Message "Repair finished, and a persistent OpenClaw console window was opened.")
+        }
+
+        return (Complete-Maintenance -Code $script:ExitCodes.Success)
+    }
+
+    Write-UiPhase -Key "repair.doctor" -Title "Running doctor checks" -Progress 60 -Message "Running doctor checks..."
+    [void](Run-Doctor)
+
+    $readyResult = Ensure-PersistentGatewayReady -AllowConsoleFallback
+    if ($readyResult.Ready) {
+        $refreshedInstalledVersion = Get-InstalledVersion
+        if ($null -ne $refreshedInstalledVersion -and -not [string]::IsNullOrWhiteSpace("$($refreshedInstalledVersion.NormalizedVersion)")) {
+            $installedVersion = $refreshedInstalledVersion
+        }
+        Write-UiPhase -Key "repair.verify" -Title "Verifying repair result" -Progress 100 -Message "Doctor checks finished. Confirming the repair result..."
+        Persist-InstallState -InstalledVersion $installedVersion.NormalizedVersion -MarkHealthy
+        if ($readyResult.UsedConsoleFallback) {
+            return (Complete-Maintenance -Code $script:ExitCodes.Success -Message "Repair finished, and a persistent OpenClaw console window was opened.")
+        }
+
+        return (Complete-Maintenance -Code $script:ExitCodes.Success)
+    }
+
+    Write-UiPhase -Key "repair.gateway-install" -Title "Reinstalling the Gateway service" -Progress 80 -Message "Reinstalling the Gateway service..."
+    [void](Run-GatewayInstallForce)
+
+    $readyResult = Ensure-PersistentGatewayReady -AllowConsoleFallback
+    if ($readyResult.Ready) {
+        $refreshedInstalledVersion = Get-InstalledVersion
+        if ($null -ne $refreshedInstalledVersion -and -not [string]::IsNullOrWhiteSpace("$($refreshedInstalledVersion.NormalizedVersion)")) {
+            $installedVersion = $refreshedInstalledVersion
+        }
+        Write-UiPhase -Key "repair.verify" -Title "Verifying repair result" -Progress 100 -Message "Gateway service rewrite finished. Confirming the repair result..."
+        Persist-InstallState -InstalledVersion $installedVersion.NormalizedVersion -MarkHealthy
+        if ($readyResult.UsedConsoleFallback) {
+            return (Complete-Maintenance -Code $script:ExitCodes.Success -Message "Repair finished, and a persistent OpenClaw console window was opened.")
+        }
+
+        return (Complete-Maintenance -Code $script:ExitCodes.Success)
+    }
+
+    if (Open-Onboard) {
+        return (Complete-Maintenance -Code $script:ExitCodes.NeedsAttention)
+    }
+
+    return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired)
+}
+
+try {
+    Ensure-Directory -Path $script:Context.DataRoot
+    if (-not [string]::IsNullOrWhiteSpace($script:Context.LogPath)) {
+        Ensure-Directory -Path ([IO.Path]::GetDirectoryName($script:Context.LogPath))
+    }
+    Ensure-Directory -Path $script:Context.TempRoot
+
+    Write-Log -Level "INFO" -Message ("Maintenance mode: {0}" -f $script:Context.Mode)
+    Write-Log -Level "INFO" -Message ("Invoker: {0}" -f $(if ([string]::IsNullOrWhiteSpace($script:Context.InvokerPath)) { "<unknown>" } else { $script:Context.InvokerPath }))
+
+    $exitCode = switch ($script:Context.Mode) {
+        "Start"  { Invoke-StartMode }
+        "Update" { Invoke-UpdateMode }
+        "Repair" { Invoke-RepairMode }
+        default  { $script:ExitCodes.ReinstallRequired }
+    }
+
+    Write-Log -Level "INFO" -Message ("Maintenance finished with exit code {0}" -f $exitCode)
+    exit $exitCode
+} catch {
+    Write-Log -Level "ERROR" -Message ("Fatal maintenance error: {0}" -f $_.Exception)
+    [void](Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired)
+    exit $script:ExitCodes.ReinstallRequired
+} finally {
+    if ($script:Context.TempRoot -and (Test-Path -LiteralPath $script:Context.TempRoot)) {
+        try {
+            Remove-Item -LiteralPath $script:Context.TempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        } catch {}
+    }
+}
