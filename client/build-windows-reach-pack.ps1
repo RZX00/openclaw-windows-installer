@@ -631,7 +631,7 @@ public static class Program
     [STAThread]
     public static int Main(string[] args)
     {
-        Console.OutputEncoding = Encoding.UTF8;
+        TryInitializeConsoleEncoding();
         string extractRoot = null;
         ProgressForm progressForm = null;
 
@@ -849,7 +849,7 @@ public static class Program
         {
             if (ex.NativeErrorCode == 1223)
             {
-                Console.Error.WriteLine("[ERROR] " + UacDeniedMessage);
+                TryWriteErrorLine("[ERROR] " + UacDeniedMessage);
                 return 1;
             }
 
@@ -1024,7 +1024,7 @@ public static class Program
         }
 
         RenderProgress(activity, bytesToCopy, bytesToCopy, lastPercent, null, progressForm);
-        Console.WriteLine();
+        TryWriteLine();
     }
 
     private static void ExtractZipWithProgress(string zipPath, string destination, ProgressForm progressForm)
@@ -1067,7 +1067,7 @@ public static class Program
             }
 
             RenderProgress(PayloadUnpackMessage, totalFiles, totalFiles, lastPercent, totalFiles + "/" + totalFiles, progressForm);
-            Console.WriteLine();
+            TryWriteLine();
         }
     }
 
@@ -1095,8 +1095,68 @@ public static class Program
             line += " (" + suffix + ")";
         }
 
-        Console.Write(line.PadRight(Console.BufferWidth > 0 ? Console.BufferWidth - 1 : line.Length));
+        TryWrite(line.PadRight(GetSafeConsoleWidth(line.Length)));
         return percent;
+    }
+
+    private static void TryInitializeConsoleEncoding()
+    {
+        try
+        {
+            Console.OutputEncoding = Encoding.UTF8;
+        }
+        catch
+        {
+        }
+    }
+
+    private static void TryWriteLine()
+    {
+        try
+        {
+            Console.WriteLine();
+        }
+        catch
+        {
+        }
+    }
+
+    private static void TryWrite(string value)
+    {
+        try
+        {
+            Console.Write(value);
+        }
+        catch
+        {
+        }
+    }
+
+    private static void TryWriteErrorLine(string value)
+    {
+        try
+        {
+            Console.Error.WriteLine(value);
+        }
+        catch
+        {
+        }
+    }
+
+    private static int GetSafeConsoleWidth(int fallback)
+    {
+        try
+        {
+            if (Console.BufferWidth > 1)
+            {
+                return Console.BufferWidth - 1;
+            }
+        }
+        catch
+        {
+        }
+
+        return Math.Max(1, fallback);
     }
 
     private static void TryDelete(string path)

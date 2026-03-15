@@ -763,7 +763,7 @@ public static class Program
     [STAThread]
     public static int Main(string[] args)
     {
-        Console.OutputEncoding = Encoding.UTF8;
+        TryInitializeConsoleEncoding();
         string extractRoot = null;
 
         try
@@ -780,7 +780,7 @@ public static class Program
             ExtractPayload(exePath, payloadZipPath);
             ExtractZipWithProgress(payloadZipPath, extractRoot);
             TryDelete(payloadZipPath);
-            Console.WriteLine("[INFO] " + StartingInstallMessage + "...");
+            TryWriteLine("[INFO] " + StartingInstallMessage + "...");
 
             string runInstallPath = Path.Combine(extractRoot, "run-install.cmd");
             if (!File.Exists(runInstallPath))
@@ -808,11 +808,11 @@ public static class Program
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine("[ERROR] " + ex.Message);
-            Console.Error.WriteLine(ex.ToString());
-            Console.WriteLine();
-            Console.Write(ClosePrompt);
-            Console.ReadKey(true);
+            TryWriteErrorLine("[ERROR] " + ex.Message);
+            TryWriteErrorLine(ex.ToString());
+            TryWriteLine();
+            TryWrite(ClosePrompt);
+            TryReadClosePrompt();
             TryDeleteDirectory(extractRoot);
             return 1;
         }
@@ -872,7 +872,7 @@ public static class Program
         {
             if (ex.NativeErrorCode == 1223)
             {
-                Console.Error.WriteLine("[ERROR] " + UacDeniedMessage);
+                TryWriteErrorLine("[ERROR] " + UacDeniedMessage);
                 return 1;
             }
 
@@ -1052,7 +1052,7 @@ public static class Program
         }
 
         RenderProgress(activity, bytesToCopy, bytesToCopy, lastPercent, null);
-        Console.WriteLine();
+        TryWriteLine();
     }
 
     private static void ExtractZipWithProgress(string zipPath, string destination)
@@ -1095,7 +1095,7 @@ public static class Program
             }
 
             RenderProgress(PayloadUnpackMessage, totalFiles, totalFiles, lastPercent, totalFiles + "/" + totalFiles);
-            Console.WriteLine();
+            TryWriteLine();
         }
     }
 
@@ -1117,8 +1117,90 @@ public static class Program
         {
             line += " (" + suffix + ")";
         }
-        Console.Write(line.PadRight(Console.BufferWidth > 0 ? Console.BufferWidth - 1 : line.Length));
+        TryWrite(line.PadRight(GetSafeConsoleWidth(line.Length)));
         return percent;
+    }
+
+    private static void TryInitializeConsoleEncoding()
+    {
+        try
+        {
+            Console.OutputEncoding = Encoding.UTF8;
+        }
+        catch
+        {
+        }
+    }
+
+    private static void TryWriteLine()
+    {
+        try
+        {
+            Console.WriteLine();
+        }
+        catch
+        {
+        }
+    }
+
+    private static void TryWriteLine(string value)
+    {
+        try
+        {
+            Console.WriteLine(value);
+        }
+        catch
+        {
+        }
+    }
+
+    private static void TryWrite(string value)
+    {
+        try
+        {
+            Console.Write(value);
+        }
+        catch
+        {
+        }
+    }
+
+    private static void TryWriteErrorLine(string value)
+    {
+        try
+        {
+            Console.Error.WriteLine(value);
+        }
+        catch
+        {
+        }
+    }
+
+    private static void TryReadClosePrompt()
+    {
+        try
+        {
+            Console.ReadKey(true);
+        }
+        catch
+        {
+        }
+    }
+
+    private static int GetSafeConsoleWidth(int fallback)
+    {
+        try
+        {
+            if (Console.BufferWidth > 1)
+            {
+                return Console.BufferWidth - 1;
+            }
+        }
+        catch
+        {
+        }
+
+        return Math.Max(1, fallback);
     }
 
     private static void TryDelete(string path)
