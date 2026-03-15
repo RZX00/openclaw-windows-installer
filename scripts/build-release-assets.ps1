@@ -133,8 +133,12 @@ function Build-ReleaseLaunchers {
 
 $repoRoot = Split-Path -Path $PSScriptRoot -Parent
 $buildScript = Join-Path $repoRoot "client\build-windows-oneclick-installer.ps1"
+$reachBuildScript = Join-Path $repoRoot "client\build-windows-reach-pack.ps1"
 if (-not (Test-Path -LiteralPath $buildScript)) {
     throw "Build script was not found: $buildScript"
+}
+if (-not (Test-Path -LiteralPath $reachBuildScript)) {
+    throw "Reach build script was not found: $reachBuildScript"
 }
 
 if ([string]::IsNullOrWhiteSpace($OutputDir)) {
@@ -146,10 +150,13 @@ Ensure-Directory -Path $OutputDir
 $baseName = "OpenClaw-Setup-Windows-$Architecture"
 $baseFileName = "$baseName.exe"
 $baseFilePath = Join-Path $OutputDir $baseFileName
+$reachFileName = "OpenClaw-Reach-Pack.exe"
+$reachFilePath = Join-Path $OutputDir $reachFileName
 
 Get-ChildItem -LiteralPath $OutputDir -File -ErrorAction SilentlyContinue |
     Where-Object {
         $_.Name -like "$baseName*.exe" -or
+        $_.Name -like "OpenClaw-Reach-Pack*.exe" -or
         $_.Name -like "OpenClaw-Start*.exe" -or
         $_.Name -like "OpenClaw-Update*.exe" -or
         $_.Name -like "OpenClaw-Repair*.exe" -or
@@ -169,9 +176,20 @@ if (-not (Test-Path -LiteralPath $baseFilePath)) {
     throw "Release asset was not produced: $baseFilePath"
 }
 
+& $reachBuildScript `
+    -Locale $Locale `
+    -Architecture $Architecture `
+    -OutputDir $OutputDir `
+    -OutputName $reachFileName
+
+if (-not (Test-Path -LiteralPath $reachFilePath)) {
+    throw "Reach release asset was not produced: $reachFilePath"
+}
+
 $launcherPaths = Build-ReleaseLaunchers -OutputDir $OutputDir -Locale $Locale
 
 Write-Host ("[OK] Release asset: {0}" -f $baseFilePath)
+Write-Host ("[OK] Reach asset: {0}" -f $reachFilePath)
 foreach ($launcherPath in $launcherPaths) {
     Write-Host ("[OK] Launcher asset: {0}" -f $launcherPath)
 }
