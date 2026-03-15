@@ -16,7 +16,8 @@ internal static class Program
     private const int RepairTimeoutSeconds = 600;
     private const int UpdateTimeoutSeconds = 3600;
     private const string UiPrefix = "OPENCLAW_UI ";
-    private const string WindowTitleSignatureSuffix = " BY 那纸";
+    private const string WindowTitleSignatureSuffix = " by RZX000";
+    private const string RepositoryUrl = "https://github.com/RZX00/openclaw-windows-installer";
 
     private sealed class LicenseGateResult
     {
@@ -619,6 +620,11 @@ internal static class Program
 
     private static string GetWindowTitle(MaintenanceMode mode, string locale)
     {
+        return GetModeWindowTitle(mode, locale) + WindowTitleSignatureSuffix;
+    }
+
+    private static string GetModeWindowTitle(MaintenanceMode mode, string locale)
+    {
         string baseTitle;
         switch (mode)
         {
@@ -633,7 +639,7 @@ internal static class Program
                 break;
         }
 
-        return baseTitle + WindowTitleSignatureSuffix;
+        return baseTitle;
     }
 
     private static string GetModeDisplayName(MaintenanceMode mode, string locale)
@@ -799,16 +805,30 @@ internal static class Program
             titleLabel.Location = new Point(86, 20);
             titleLabel.Size = new Size(760, 28);
             titleLabel.Font = new Font("Microsoft YaHei UI", 16F, FontStyle.Bold, GraphicsUnit.Point);
-            titleLabel.Text = GetWindowTitle(mode, locale);
+            titleLabel.Text = GetModeWindowTitle(mode, locale);
             headerPanel.Controls.Add(titleLabel);
 
             modeLabel = new Label();
             modeLabel.AutoSize = false;
             modeLabel.Location = new Point(88, 57);
-            modeLabel.Size = new Size(760, 22);
+            modeLabel.Size = new Size(620, 22);
             modeLabel.ForeColor = Color.DimGray;
             modeLabel.Text = T("当前模式：", "Mode: ") + GetModeDisplayName(mode, locale);
             headerPanel.Controls.Add(modeLabel);
+
+            LinkLabel signatureLinkLabel = new LinkLabel();
+            signatureLinkLabel.AutoSize = false;
+            signatureLinkLabel.Location = new Point(722, 56);
+            signatureLinkLabel.Size = new Size(120, 22);
+            signatureLinkLabel.TextAlign = ContentAlignment.MiddleRight;
+            signatureLinkLabel.LinkBehavior = LinkBehavior.HoverUnderline;
+            signatureLinkLabel.LinkColor = Color.DimGray;
+            signatureLinkLabel.ActiveLinkColor = Color.FromArgb(0, 84, 147);
+            signatureLinkLabel.VisitedLinkColor = Color.DimGray;
+            signatureLinkLabel.Font = new Font("Segoe UI", 9F, FontStyle.Italic, GraphicsUnit.Point);
+            signatureLinkLabel.Text = "by RZX000";
+            signatureLinkLabel.LinkClicked += delegate { OpenExternalTarget(RepositoryUrl); };
+            headerPanel.Controls.Add(signatureLinkLabel);
 
             phaseLabel = new Label();
             phaseLabel.AutoSize = false;
@@ -1382,6 +1402,25 @@ internal static class Program
             catch (Exception ex)
             {
                 SetStatus(T("打开日志目录失败：", "Failed to open the log folder: ") + ex.Message, VisualState.Warning);
+            }
+        }
+
+        private void OpenExternalTarget(string target)
+        {
+            if (string.IsNullOrWhiteSpace(target))
+            {
+                return;
+            }
+
+            try
+            {
+                ProcessStartInfo startInfo = new ProcessStartInfo(target);
+                startInfo.UseShellExecute = true;
+                Process.Start(startInfo);
+            }
+            catch (Exception ex)
+            {
+                SetStatus(T("打开仓库链接失败：", "Failed to open the repository link: ") + ex.Message, VisualState.Warning);
             }
         }
 

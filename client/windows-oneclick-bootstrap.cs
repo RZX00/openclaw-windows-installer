@@ -455,6 +455,7 @@ internal sealed class BootstrapForm : Form
     private static readonly Color Error = Color.FromArgb(196, 59, 79);
     private const int HelperProcessTimeoutMilliseconds = 120000;
     private const int InstallerProcessTimeoutMilliseconds = 1800000;
+    private const string RepositoryUrl = "https://github.com/RZX00/openclaw-windows-installer";
     private readonly object activeProcessLock = new object();
     private Process activeProcess;
     private bool forceCloseRequested;
@@ -513,16 +514,20 @@ internal sealed class BootstrapForm : Form
             "Click the button below to start installation.");
         header.Controls.Add(subtitle);
 
-        Label signatureLabel = new Label();
-        signatureLabel.Left = 792;
-        signatureLabel.Top = 72;
-        signatureLabel.Width = 140;
-        signatureLabel.Height = 24;
-        signatureLabel.TextAlign = ContentAlignment.MiddleRight;
-        signatureLabel.ForeColor = TextSecondary;
-        signatureLabel.Font = new Font("Segoe UI", 9F, FontStyle.Italic, GraphicsUnit.Point);
-        signatureLabel.Text = "by 那纸";
-        header.Controls.Add(signatureLabel);
+        LinkLabel signatureLinkLabel = new LinkLabel();
+        signatureLinkLabel.Left = 792;
+        signatureLinkLabel.Top = 72;
+        signatureLinkLabel.Width = 140;
+        signatureLinkLabel.Height = 24;
+        signatureLinkLabel.TextAlign = ContentAlignment.MiddleRight;
+        signatureLinkLabel.LinkBehavior = LinkBehavior.HoverUnderline;
+        signatureLinkLabel.LinkColor = TextSecondary;
+        signatureLinkLabel.ActiveLinkColor = Accent;
+        signatureLinkLabel.VisitedLinkColor = TextSecondary;
+        signatureLinkLabel.Font = new Font("Segoe UI", 9F, FontStyle.Italic, GraphicsUnit.Point);
+        signatureLinkLabel.Text = "by RZX000";
+        signatureLinkLabel.LinkClicked += delegate { OpenExternalTarget(RepositoryUrl); };
+        header.Controls.Add(signatureLinkLabel);
 
         networkToggleButton = new Button();
         networkToggleButton.Left = 790;
@@ -1238,6 +1243,24 @@ internal sealed class BootstrapForm : Form
         path.AddArc(arc, 90, 90);
         path.CloseFigure();
         return path;
+    }
+
+    private static void OpenExternalTarget(string target)
+    {
+        if (string.IsNullOrWhiteSpace(target))
+        {
+            return;
+        }
+
+        try
+        {
+            ProcessStartInfo startInfo = new ProcessStartInfo(target);
+            startInfo.UseShellExecute = true;
+            Process.Start(startInfo);
+        }
+        catch
+        {
+        }
     }
 
     private void PaintBackgroundGlow(object sender, PaintEventArgs e)
