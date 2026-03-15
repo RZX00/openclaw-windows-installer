@@ -2495,6 +2495,33 @@ function Classify-DashboardFailureReason {
     return $DefaultReason
 }
 
+function New-DashboardVerificationResult {
+    param(
+        [string]$Disposition,
+        [string]$Reason,
+        [string]$Summary = $null,
+        [string]$NextAction = $null,
+        [string]$RecoveryCommand = $null,
+        [string]$Url = $null,
+        [System.Uri]$Uri = $null,
+        [string]$OutputText = $null,
+        [string]$Mode = $null
+    )
+
+    return [pscustomobject]@{
+        Ready           = ($Disposition -eq "verified-url")
+        Disposition     = $Disposition
+        Reason          = $Reason
+        Summary         = $Summary
+        NextAction      = $NextAction
+        RecoveryCommand = $RecoveryCommand
+        Url             = $Url
+        Uri             = $Uri
+        OutputText      = $OutputText
+        Mode            = $Mode
+    }
+}
+
 function Verify-DashboardReady {
     param(
         [string]$StartMode = "local-stable"
@@ -2503,112 +2530,63 @@ function Verify-DashboardReady {
     $normalizedStartMode = Get-NormalizedStartMode -Value $StartMode
     if ($script:Context.Capabilities.DashboardNoOpen) {
         try {
-            $result = Invoke-OpenClaw -Arguments @("dashboard", "--no-open") -TimeoutSeconds 45
+            $result = Invoke-OpenClaw -Arguments @("dashboard", "--no-open") -TimeoutSeconds 15
             $outputText = ($result.Output -join "`n").Trim()
+            $dashboardUrl = Get-FirstHttpUrlFromText -Text $outputText
+            $dashboardUri = Try-ParseHttpUri -Value $dashboardUrl
             if ($result.TimedOut) {
-                return [pscustomobject]@{
-                    Ready    = $false
-                    Reason   = "dashboard_timeout"
-                    Summary  = "Dashboard verification timed out."
-                    NextAction = "Run Repair again or inspect the gateway logs."
-                    OutputText = $outputText
-                }
+                return (New-DashboardVerificationResult -Disposition "soft-fail" -Reason "dashboard_timeout" -Summary "Dashboard verification timed out." -NextAction "The native dashboard launcher will be tried directly. If this keeps happening, run Repair and inspect the gateway logs." -RecoveryCommand "openclaw dashboard" -Url $dashboardUrl -Uri $dashboardUri -OutputText $outputText -Mode "native-precheck")
             }
 
             if ($result.ExitCode -ne 0) {
                 $reason = Classify-DashboardFailureReason -OutputText $outputText -DefaultReason "dashboard_verify_failed"
-                return [pscustomobject]@{
-                    Ready      = $false
-                    Reason     = $reason
-                    Summary    = "Dashboard verification failed."
-                    NextAction = if ($reason -eq "origin_not_allowed") {
-                        "Dashboard origin policy drift was detected. Run Repair first."
-                    } else {
-                        "Run Repair first to realign the Dashboard and Gateway configuration."
+                if ($reason -eq "origin_not_allowed") {
+                    if ($normalizedStartMode -eq "local-stable" -and $null -ne $dashboardUri -and -not (Test-LoopbackHost -OriginHost $dashboardUri.Host)) {
+                        return (New-DashboardVerificationResult -Disposition "hard-fail" -Reason "dashboard_remote_url" -Summary "The current Dashboard URL is not loopback. One-click Start will not continue through a remote/LAN path." -NextAction "Restore a loopback dashboard path, then run Start again. For remote access, use Tailscale Serve HTTPS or an SSH tunnel." -RecoveryCommand "openclaw dashboard --no-open" -Url $dashboardUrl -Uri $dashboardUri -OutputText $outputText -Mode "native-precheck")
                     }
-                    OutputText = $outputText
+
+                    return (New-DashboardVerificationResult -Disposition "hard-fail" -Reason "origin_not_allowed" -Summary "Loopback Dashboard origin policy drift was detected." -NextAction "The wrapper will only do one local-safe repair. If the next retry still fails, run Repair." -RecoveryCommand "openclaw config get gateway.controlUi.allowedOrigins" -Url $dashboardUrl -Uri $dashboardUri -OutputText $outputText -Mode "native-precheck")
                 }
+
+                if ($reason -eq "gateway_token_required") {
+                    return (New-DashboardVerificationResult -Disposition "hard-fail" -Reason "gateway_token_required" -Summary "Dashboard bootstrap still requires a Gateway token." -NextAction "The wrapper will retry local token repair once. If it still fails, run Repair." -RecoveryCommand "openclaw doctor --generate-gateway-token" -Url $dashboardUrl -Uri $dashboardUri -OutputText $outputText -Mode "native-precheck")
+                }
+
+                return (New-DashboardVerificationResult -Disposition "soft-fail" -Reason "dashboard_verify_failed" -Summary "Dashboard verification failed, but the native dashboard launcher can still be tried." -NextAction "The native dashboard launcher will be tried directly. If that still fails, run Repair." -RecoveryCommand "openclaw dashboard" -Url $dashboardUrl -Uri $dashboardUri -OutputText $outputText -Mode "native-precheck")
             }
 
-            $dashboardUrl = Get-FirstHttpUrlFromText -Text $outputText
             if ([string]::IsNullOrWhiteSpace($dashboardUrl)) {
-                return [pscustomobject]@{
-                    Ready      = $false
-                    Reason     = "dashboard_url_missing"
-                    Summary    = "Dashboard verification did not return a usable URL."
-                    NextAction = "Run Repair first and confirm the Control UI address and asset path."
-                    OutputText = $outputText
-                }
+                return (New-DashboardVerificationResult -Disposition "soft-fail" -Reason "dashboard_url_missing" -Summary "Dashboard verification did not return a usable URL." -NextAction "The native dashboard launcher will be tried directly." -RecoveryCommand "openclaw dashboard" -OutputText $outputText -Mode "native-precheck")
             }
 
-            $dashboardUri = Try-ParseHttpUri -Value $dashboardUrl
             if ($null -eq $dashboardUri) {
-                return [pscustomobject]@{
-                    Ready      = $false
-                    Reason     = "dashboard_url_invalid"
-                    Summary    = "Dashboard returned an invalid URL."
-                    NextAction = "Run Repair first and confirm the dashboard URL configuration."
-                    OutputText = $outputText
-                }
+                return (New-DashboardVerificationResult -Disposition "soft-fail" -Reason "dashboard_url_invalid" -Summary "Dashboard returned an invalid URL." -NextAction "The native dashboard launcher will be tried directly." -RecoveryCommand "openclaw dashboard" -Url $dashboardUrl -OutputText $outputText -Mode "native-precheck")
             }
 
             if ($normalizedStartMode -eq "local-stable" -and -not (Test-LoopbackHost -OriginHost $dashboardUri.Host)) {
-                return [pscustomobject]@{
-                    Ready      = $false
-                    Reason     = "origin_not_allowed"
-                    Summary    = "The current Dashboard URL is not loopback. One-click Start will not continue through a remote/LAN path."
-                    NextAction = "Run Repair first to restore a local dashboard path. For remote access, use Tailscale Serve HTTPS or an SSH tunnel."
-                    OutputText = $outputText
-                }
+                return (New-DashboardVerificationResult -Disposition "hard-fail" -Reason "dashboard_remote_url" -Summary "The current Dashboard URL is not loopback. One-click Start will not continue through a remote/LAN path." -NextAction "Restore a loopback dashboard path, then run Start again. For remote access, use Tailscale Serve HTTPS or an SSH tunnel." -RecoveryCommand "openclaw dashboard --no-open" -Url $dashboardUrl -Uri $dashboardUri -OutputText $outputText -Mode "native-precheck")
             }
 
-            return [pscustomobject]@{
-                Ready      = $true
-                Reason     = "dashboard_ready"
-                Url        = $dashboardUrl
-                Uri        = $dashboardUri
-                OutputText = $outputText
-                Mode       = "native"
-            }
+            return (New-DashboardVerificationResult -Disposition "verified-url" -Reason "dashboard_ready" -Url $dashboardUrl -Uri $dashboardUri -OutputText $outputText -Mode "native")
         } catch {
             Write-Log -Level "WARN" -Message ("Failed to verify dashboard readiness via CLI: {0}" -f $_.Exception.Message)
+            return (New-DashboardVerificationResult -Disposition "soft-fail" -Reason "dashboard_verify_failed" -Summary "Dashboard verification threw an exception, but the native dashboard launcher can still be tried." -NextAction "The native dashboard launcher will be tried directly. If that still fails, run Repair." -RecoveryCommand "openclaw dashboard" -OutputText $_.Exception.Message -Mode "native-precheck")
         }
     }
 
-    if (-not $script:Context.Capabilities.Dashboard) {
-        $fallbackUrl = Resolve-LoopbackDashboardUrlFromConfig
-        $fallbackUri = Try-ParseHttpUri -Value $fallbackUrl
-        if ($null -ne $fallbackUri -and (($normalizedStartMode -ne "local-stable") -or (Test-LoopbackHost -OriginHost $fallbackUri.Host))) {
-            return [pscustomobject]@{
-                Ready      = $true
-                Reason     = "dashboard_fallback_ready"
-                Url        = $fallbackUrl
-                Uri        = $fallbackUri
-                OutputText = $null
-                Mode       = "url-fallback"
-            }
+    $fallbackUrl = Resolve-LoopbackDashboardUrlFromConfig
+    $fallbackUri = Try-ParseHttpUri -Value $fallbackUrl
+    if ($null -ne $fallbackUri -and (($normalizedStartMode -ne "local-stable") -or (Test-LoopbackHost -OriginHost $fallbackUri.Host))) {
+        if (-not $script:Context.Capabilities.Dashboard) {
+            return (New-DashboardVerificationResult -Disposition "verified-url" -Reason "dashboard_fallback_ready" -Url $fallbackUrl -Uri $fallbackUri -Mode "url-fallback")
+        }
+
+        if ($normalizedStartMode -eq "lan-breakglass") {
+            return (New-DashboardVerificationResult -Disposition "verified-url" -Reason "dashboard_fallback_ready" -Url $fallbackUrl -Uri $fallbackUri -Mode "url-fallback")
         }
     }
 
-    if ($normalizedStartMode -eq "lan-breakglass") {
-        $fallbackUrl = Resolve-LoopbackDashboardUrlFromConfig
-        return [pscustomobject]@{
-            Ready      = $true
-            Reason     = "dashboard_fallback_ready"
-            Url        = $fallbackUrl
-            Uri        = (Try-ParseHttpUri -Value $fallbackUrl)
-            OutputText = $null
-            Mode       = "url-fallback"
-        }
-    }
-
-    return [pscustomobject]@{
-        Ready      = $false
-        Reason     = "dashboard_command_missing"
-        Summary    = "The installed runtime does not support the native dashboard command."
-        NextAction = "Run Update or Repair first so the dashboard launcher matches this runtime."
-        OutputText = $null
-    }
+    return (New-DashboardVerificationResult -Disposition "hard-fail" -Reason "dashboard_command_missing" -Summary "The installed runtime does not support the native dashboard command and no usable fallback URL was found." -NextAction "Run Update or Repair first so the dashboard launcher matches this runtime." -OutputText $null)
 }
 
 function Get-FirstProviderRefFromText {
@@ -2771,7 +2749,7 @@ function Resolve-ProviderAuthState {
 
     if ($script:Context.Capabilities.ModelsStatusJson) {
         try {
-            $result = Invoke-OpenClaw -Arguments @("models", "status", "--json") -TimeoutSeconds 60
+            $result = Invoke-OpenClaw -Arguments @("models", "status", "--json") -TimeoutSeconds 10
             if (-not $result.TimedOut -and $result.ExitCode -eq 0) {
                 $rawText = ($result.Output -join "`n").Trim()
                 $parsed = $rawText | ConvertFrom-Json -ErrorAction Stop
@@ -2801,7 +2779,7 @@ function Resolve-ProviderAuthState {
 
     if (-not $jsonSucceeded -and $script:Context.Capabilities.ModelsStatusPlain) {
         try {
-            $result = Invoke-OpenClaw -Arguments @("models", "status") -TimeoutSeconds 60
+            $result = Invoke-OpenClaw -Arguments @("models", "status") -TimeoutSeconds 5
             if (-not $result.TimedOut -and $result.ExitCode -eq 0) {
                 $rawText = ($result.Output -join "`n").Trim()
                 if ([string]::IsNullOrWhiteSpace($providerName)) {
@@ -2825,32 +2803,12 @@ function Resolve-ProviderAuthState {
         }
     }
 
-    if (-not $jsonSucceeded -and $script:Context.Capabilities.ModelsStatusCheck) {
-        try {
-            $checkResult = Invoke-OpenClaw -Arguments @("models", "status", "--check") -TimeoutSeconds 45
-            switch ($checkResult.ExitCode) {
-                0 {
-                    $state.status = "ready"
-                    $state.source = "models-status-check"
-                    $state.message = "Provider auth is available."
-                    $jsonSucceeded = $true
-                }
-                2 {
-                    $state.status = "expiring"
-                    $state.source = "models-status-check"
-                    $state.message = "Provider auth is available but expiring soon."
-                    $jsonSucceeded = $true
-                }
-                1 {
-                    $state.status = "missing"
-                    $state.source = "models-status-check"
-                    $state.message = "Provider auth is missing or expired."
-                    $jsonSucceeded = $true
-                }
-            }
-        } catch {
-            Write-Log -Level "WARN" -Message ("Failed to classify provider auth via models status --check: {0}" -f $_.Exception.Message)
+    if (-not $jsonSucceeded) {
+        $state.status = "unknown"
+        if ([string]::IsNullOrWhiteSpace("$($state.source)") -or $state.source -eq "unknown") {
+            $state.source = "fast-classify"
         }
+        $state.message = "Provider auth could not be classified quickly."
     }
 
     $providerDisplay = if ([string]::IsNullOrWhiteSpace("$providerName")) { "provider" } else { $providerName }
@@ -2885,7 +2843,9 @@ function Start-DetachedOpenClawCommand {
     param(
         [string[]]$Arguments,
         [string]$StatusMessage = $null,
-        [string]$LogMessage = $null
+        [string]$LogMessage = $null,
+        [ValidateSet("Normal", "Hidden", "Minimized", "Maximized")]
+        [string]$WindowStyle = "Normal"
     )
 
     $wrapperPath = Resolve-WrapperPath
@@ -2902,8 +2862,17 @@ function Start-DetachedOpenClawCommand {
     if (-not [string]::IsNullOrWhiteSpace($LogMessage)) {
         Write-Log -Level "INFO" -Message $LogMessage
     }
-    Start-Process -FilePath $commandProcessor -ArgumentList @("/d", "/s", "/c", $commandLine) -WorkingDirectory $script:Context.DataRoot | Out-Null
+    Start-Process -FilePath $commandProcessor -ArgumentList @("/d", "/s", "/c", $commandLine) -WorkingDirectory $script:Context.DataRoot -WindowStyle $WindowStyle | Out-Null
     return $true
+}
+
+function Start-DetachedDashboardCommand {
+    param(
+        [string]$StatusMessage = "Opening the dashboard through the native launcher...",
+        [string]$LogMessage = "Launching dashboard via detached native command."
+    )
+
+    return (Start-DetachedOpenClawCommand -Arguments @("dashboard") -StatusMessage $StatusMessage -LogMessage $LogMessage -WindowStyle "Hidden")
 }
 
 function Open-ProviderAuthRepair {
@@ -3017,6 +2986,111 @@ function Get-DashboardRequiredOrigins {
     return @($requiredOrigins.ToArray())
 }
 
+function Resolve-LocalLoopbackDashboardTarget {
+    param([object]$Verification = $null)
+
+    $candidates = New-Object System.Collections.Generic.List[string]
+    if ($null -ne $Verification) {
+        Add-UniqueString -List $candidates -Value "$($Verification.Url)"
+    }
+    Add-UniqueString -List $candidates -Value (Resolve-LoopbackDashboardUrlFromConfig)
+
+    foreach ($candidate in $candidates) {
+        $candidateUri = Try-ParseHttpUri -Value $candidate
+        if ($null -ne $candidateUri -and (Test-LoopbackHost -OriginHost $candidateUri.Host)) {
+            return [pscustomobject]@{
+                Url = $candidate
+                Uri = $candidateUri
+            }
+        }
+    }
+
+    return [pscustomobject]@{
+        Url = $null
+        Uri = $null
+    }
+}
+
+function Invoke-DashboardOriginCompatibilityPatch {
+    param(
+        [string]$DashboardUrl,
+        [switch]$LocalSafeOnly,
+        [string]$StatusMessage = "Adding the Dashboard origin compatibility allowlist...",
+        [string]$LogPrefix = "Dashboard origin compatibility"
+    )
+
+    $requiredOrigins = @(Get-DashboardRequiredOrigins -DashboardUrl $DashboardUrl)
+    if ($LocalSafeOnly) {
+        $requiredOrigins = @($requiredOrigins | Where-Object {
+            $originUri = Try-ParseHttpUri -Value $_
+            $null -ne $originUri -and (Test-LoopbackHost -OriginHost $originUri.Host)
+        })
+    }
+
+    if ($requiredOrigins.Count -eq 0) {
+        Write-Log -Level "INFO" -Message ("{0}: no origin changes are required for {1}" -f $LogPrefix, $DashboardUrl)
+        return [pscustomobject]@{
+            Patched  = $false
+            Reloaded = $false
+        }
+    }
+
+    $allowedOriginsState = Get-ControlUiAllowedOrigins
+    if (-not $allowedOriginsState.Success) {
+        return [pscustomobject]@{
+            Patched  = $false
+            Reloaded = $false
+        }
+    }
+
+    if (Test-OriginWildcardConfigured -Origins $allowedOriginsState.Origins) {
+        Write-Log -Level "INFO" -Message ("{0}: gateway.controlUi.allowedOrigins already contains '*'; skipping patch." -f $LogPrefix)
+        return [pscustomobject]@{
+            Patched  = $false
+            Reloaded = $false
+        }
+    }
+
+    $missingOrigins = @()
+    foreach ($origin in $requiredOrigins) {
+        if (-not (Test-StringCollectionContains -Values $allowedOriginsState.Origins -Candidate $origin)) {
+            $missingOrigins += $origin
+        }
+    }
+
+    if ($missingOrigins.Count -eq 0) {
+        return [pscustomobject]@{
+            Patched  = $false
+            Reloaded = $false
+        }
+    }
+
+    Write-UiStatus -Level "info" -Message $StatusMessage
+    Write-Log -Level "INFO" -Message ("{0}: adding missing origins {1}" -f $LogPrefix, ($missingOrigins -join ", "))
+
+    $mergedOrigins = New-Object System.Collections.Generic.List[string]
+    foreach ($origin in @($allowedOriginsState.Origins + $requiredOrigins)) {
+        Add-UniqueString -List $mergedOrigins -Value $origin
+    }
+
+    if (-not (Set-ControlUiAllowedOrigins -Origins @($mergedOrigins.ToArray()))) {
+        return [pscustomobject]@{
+            Patched  = $false
+            Reloaded = $false
+        }
+    }
+
+    $reloaded = Reload-GatewayAfterControlUiConfigChange
+    if (-not $reloaded) {
+        Write-Log -Level "WARN" -Message ("{0}: allowlist patch was written, but the Gateway refresh did not complete cleanly." -f $LogPrefix)
+    }
+
+    return [pscustomobject]@{
+        Patched  = $true
+        Reloaded = $reloaded
+    }
+}
+
 function Reload-GatewayAfterControlUiConfigChange {
     Write-UiStatus -Level "info" -Message "Refreshing the Gateway to apply the Dashboard compatibility fix..."
     Write-Log -Level "INFO" -Message "Reloading the Gateway after updating gateway.controlUi.allowedOrigins."
@@ -3076,6 +3150,27 @@ function Reload-GatewayAfterControlUiConfigChange {
     return $false
 }
 
+function Reload-GatewayAfterGatewayTokenChange {
+    Write-UiStatus -Level "info" -Message "Refreshing the Gateway to apply the local Gateway token fix..."
+    Write-Log -Level "INFO" -Message "Reloading the Gateway after generating or re-checking the local Gateway token."
+
+    if (Refresh-GatewayServiceIfLoaded -StatusMessage "Refreshing the Gateway service after updating the local Gateway token..." -LogMessage "Refreshing the loaded Gateway service after updating the local Gateway token.") {
+        return $true
+    }
+
+    if (Start-Or-RestartGateway -RequirePersistentService) {
+        return $true
+    }
+
+    return (Wait-For-Healthy -Attempts 4 -DelaySeconds 4)
+}
+
+function Ensure-LocalDashboardOriginCompatibility {
+    param([string]$DashboardUrl)
+
+    return (Invoke-DashboardOriginCompatibilityPatch -DashboardUrl $DashboardUrl -LocalSafeOnly -StatusMessage "Restoring the local Dashboard origin allowlist..." -LogPrefix "Local-safe Dashboard origin repair")
+}
+
 function Ensure-DashboardOriginCompatibility {
     param(
         [string]$DashboardUrl,
@@ -3090,68 +3185,56 @@ function Ensure-DashboardOriginCompatibility {
         }
     }
 
-    $requiredOrigins = @(Get-DashboardRequiredOrigins -DashboardUrl $DashboardUrl)
-    if ($requiredOrigins.Count -eq 0) {
-        Write-Log -Level "INFO" -Message ("Dashboard URL does not require origin compatibility changes: {0}" -f $DashboardUrl)
-        return [pscustomobject]@{
-            Patched  = $false
-            Reloaded = $false
+    return (Invoke-DashboardOriginCompatibilityPatch -DashboardUrl $DashboardUrl -StatusMessage "Adding the Dashboard origin compatibility allowlist..." -LogPrefix "LAN breakglass Dashboard origin repair")
+}
+
+function Invoke-LocalSafeDashboardAutoRepair {
+    param(
+        [object]$Verification,
+        [object]$GatewayTokenState = $null
+    )
+
+    $currentGatewayTokenState = $GatewayTokenState
+    $applied = $false
+    $reloaded = $false
+    $steps = New-Object System.Collections.Generic.List[string]
+
+    if ($null -eq $currentGatewayTokenState) {
+        $currentGatewayTokenState = Ensure-GatewayTokenReady -EmitUiStatus
+    }
+
+    if ($Verification.Reason -eq "gateway_token_required" -or "$($currentGatewayTokenState.State.status)" -eq "generated") {
+        $currentGatewayTokenState = Ensure-GatewayTokenReady -EmitUiStatus
+        if ($currentGatewayTokenState.Ready) {
+            Add-UniqueString -List $steps -Value "gateway-token"
+            $applied = $true
+            if (Reload-GatewayAfterGatewayTokenChange) {
+                $reloaded = $true
+            }
         }
     }
 
-    $allowedOriginsState = Get-ControlUiAllowedOrigins
-    if (-not $allowedOriginsState.Success) {
-        return [pscustomobject]@{
-            Patched  = $false
-            Reloaded = $false
+    if ($Verification.Reason -eq "origin_not_allowed") {
+        $repairTarget = Resolve-LocalLoopbackDashboardTarget -Verification $Verification
+        if ($null -ne $repairTarget.Uri) {
+            $originRepair = Ensure-LocalDashboardOriginCompatibility -DashboardUrl $repairTarget.Url
+            if ($originRepair.Patched) {
+                Add-UniqueString -List $steps -Value "allowed-origins"
+                $applied = $true
+                if ($originRepair.Reloaded) {
+                    $reloaded = $true
+                }
+            }
+        } else {
+            Write-Log -Level "INFO" -Message "Skipping local-safe origin repair because no loopback Dashboard URL could be resolved."
         }
-    }
-
-    if (Test-OriginWildcardConfigured -Origins $allowedOriginsState.Origins) {
-        Write-Log -Level "INFO" -Message "gateway.controlUi.allowedOrigins already contains '*'; skipping Dashboard compatibility patch."
-        return [pscustomobject]@{
-            Patched  = $false
-            Reloaded = $false
-        }
-    }
-
-    $missingOrigins = @()
-    foreach ($origin in $requiredOrigins) {
-        if (-not (Test-StringCollectionContains -Values $allowedOriginsState.Origins -Candidate $origin)) {
-            $missingOrigins += $origin
-        }
-    }
-
-    if ($missingOrigins.Count -eq 0) {
-        return [pscustomobject]@{
-            Patched  = $false
-            Reloaded = $false
-        }
-    }
-
-    Write-UiStatus -Level "info" -Message "Adding the Dashboard origin compatibility allowlist..."
-    Write-Log -Level "INFO" -Message ("Adding missing Dashboard origins: {0}" -f ($missingOrigins -join ", "))
-
-    $mergedOrigins = New-Object System.Collections.Generic.List[string]
-    foreach ($origin in @($allowedOriginsState.Origins + $requiredOrigins)) {
-        Add-UniqueString -List $mergedOrigins -Value $origin
-    }
-
-    if (-not (Set-ControlUiAllowedOrigins -Origins @($mergedOrigins.ToArray()))) {
-        return [pscustomobject]@{
-            Patched  = $false
-            Reloaded = $false
-        }
-    }
-
-    $reloaded = Reload-GatewayAfterControlUiConfigChange
-    if (-not $reloaded) {
-        Write-Log -Level "WARN" -Message "The Dashboard origin compatibility patch was written, but the Gateway refresh did not complete cleanly."
     }
 
     return [pscustomobject]@{
-        Patched  = $true
-        Reloaded = $reloaded
+        Applied           = $applied
+        Reloaded          = $reloaded
+        Steps             = @($steps.ToArray())
+        GatewayTokenState = $currentGatewayTokenState
     }
 }
 
@@ -3159,7 +3242,7 @@ function Resolve-DashboardUrl {
     param([string]$StartMode = "local-stable")
 
     $verification = Verify-DashboardReady -StartMode $StartMode
-    if ($verification.Ready) {
+    if ($verification.Disposition -eq "verified-url") {
         return $verification.Url
     }
 
@@ -3169,7 +3252,8 @@ function Resolve-DashboardUrl {
 function Open-DashboardEntry {
     param(
         [object]$Verification = $null,
-        [string]$StartMode = "local-stable"
+        [string]$StartMode = "local-stable",
+        [switch]$AutoRepaired
     )
 
     $normalizedStartMode = Get-NormalizedStartMode -Value $StartMode
@@ -3178,7 +3262,7 @@ function Open-DashboardEntry {
         $readyState = Verify-DashboardReady -StartMode $normalizedStartMode
     }
 
-    if (-not $readyState.Ready) {
+    if ($readyState.Disposition -eq "hard-fail") {
         return [pscustomobject]@{
             Opened          = $false
             Mode            = "none"
@@ -3189,79 +3273,93 @@ function Open-DashboardEntry {
         }
     }
 
-    if ($normalizedStartMode -eq "lan-breakglass" -and -not [string]::IsNullOrWhiteSpace("$($readyState.Url)")) {
+    if ($normalizedStartMode -eq "lan-breakglass" -and $readyState.Disposition -eq "verified-url" -and -not [string]::IsNullOrWhiteSpace("$($readyState.Url)")) {
         $compatibilityResult = Ensure-DashboardOriginCompatibility -DashboardUrl "$($readyState.Url)" -StartMode $normalizedStartMode
         if ($compatibilityResult.Patched) {
             Write-Log -Level "INFO" -Message ("Dashboard origin compatibility patch applied (reloaded={0})." -f $compatibilityResult.Reloaded)
         }
     }
 
-    if ($script:Context.Capabilities.Dashboard) {
+    if ($readyState.Disposition -eq "verified-url" -and -not [string]::IsNullOrWhiteSpace("$($readyState.Url)")) {
         try {
-            Write-UiStatus -Level "info" -Message "Opening the dashboard through the native launcher..."
-            $result = Invoke-OpenClaw -Arguments @("dashboard") -TimeoutSeconds 45
-            if (-not $result.TimedOut -and $result.ExitCode -eq 0) {
-                return [pscustomobject]@{
-                    Opened          = $true
-                    Mode            = "native"
-                    Reason          = "dashboard_opened"
-                    Summary         = $null
-                    NextAction      = $null
-                    RecoveryCommand = $null
-                }
-            }
-
-            $outputText = ($result.Output -join "`n").Trim()
-            $reason = Classify-DashboardFailureReason -OutputText $outputText -DefaultReason "dashboard_open_failed"
-            return [pscustomobject]@{
-                Opened          = $false
-                Mode            = "none"
-                Reason          = $reason
-                Summary         = "The native dashboard launch did not complete cleanly."
-                NextAction      = if ($reason -eq "origin_not_allowed") {
-                    "Dashboard origin policy drift was detected. Run Repair first."
-                } else {
-                    "Run Repair first, then try Start again."
-                }
-                RecoveryCommand = "openclaw dashboard"
-            }
-        } catch {
-            Write-Log -Level "WARN" -Message ("Failed to open dashboard natively: {0}" -f $_.Exception.Message)
-            return [pscustomobject]@{
-                Opened          = $false
-                Mode            = "none"
-                Reason          = "dashboard_open_failed"
-                Summary         = "The native dashboard launch threw an exception."
-                NextAction      = "Run Repair first, then try Start again."
-                RecoveryCommand = "openclaw dashboard"
-            }
-        }
-    }
-
-    if (-not [string]::IsNullOrWhiteSpace("$($readyState.Url)")) {
-        try {
-            Write-UiStatus -Level "warn" -Message "The native dashboard command is unavailable. Falling back to the parsed URL..."
+            Write-UiStatus -Level "info" -Message "Opening the verified dashboard URL directly..."
             Start-Process -FilePath "$($readyState.Url)" | Out-Null
             return [pscustomobject]@{
                 Opened          = $true
-                Mode            = "url-fallback"
-                Reason          = "dashboard_opened_fallback"
-                Summary         = $null
+                Mode            = $(if ($AutoRepaired) { "auto-repaired-url" } else { "url-direct" })
+                Reason          = $(if ($AutoRepaired) { "dashboard_auto_repair_applied" } else { "dashboard_url_opened" })
+                Summary         = $(if ($AutoRepaired) { "A local-safe dashboard repair was applied and the verified dashboard URL was opened." } else { "The verified dashboard URL was opened directly." })
                 NextAction      = $null
                 RecoveryCommand = $null
             }
         } catch {
-            Write-Log -Level "WARN" -Message ("Failed to open dashboard fallback URL: {0}" -f $_.Exception.Message)
+            Write-Log -Level "WARN" -Message ("Failed to open verified dashboard URL directly: {0}" -f $_.Exception.Message)
+        }
+    }
+
+    if ($script:Context.Capabilities.Dashboard) {
+        $statusMessage = if ($readyState.Disposition -eq "soft-fail") {
+            "Dashboard precheck soft-failed. Starting the native dashboard launcher directly..."
+        } else {
+            "Opening the dashboard through the native launcher..."
+        }
+        $logMessage = if ($readyState.Disposition -eq "soft-fail") {
+            "Dashboard precheck soft-failed; launching native dashboard detached."
+        } elseif ($AutoRepaired) {
+            "Launching dashboard detached after a local-safe repair."
+        } else {
+            "Launching dashboard detached after direct URL open fallback."
+        }
+
+        try {
+            if (Start-DetachedDashboardCommand -StatusMessage $statusMessage -LogMessage $logMessage) {
+                return [pscustomobject]@{
+                    Opened          = $true
+                    Mode            = if ($AutoRepaired) {
+                        "auto-repaired-native"
+                    } elseif ($readyState.Disposition -eq "soft-fail") {
+                        "soft-fallback-native"
+                    } else {
+                        "native-detached"
+                    }
+                    Reason          = if ($AutoRepaired) {
+                        "dashboard_auto_repair_applied"
+                    } elseif ($readyState.Disposition -eq "soft-fail") {
+                        "dashboard_precheck_soft_failed"
+                    } else {
+                        "dashboard_native_detached_started"
+                    }
+                    Summary         = if ($AutoRepaired) {
+                        "A local-safe dashboard repair was applied and the native dashboard launcher was started in detached mode."
+                    } elseif ($readyState.Disposition -eq "soft-fail") {
+                        "Dashboard precheck soft-failed, but the native dashboard launcher was started in detached mode."
+                    } else {
+                        "The native dashboard launcher was started in detached mode."
+                    }
+                    NextAction      = $null
+                    RecoveryCommand = $null
+                }
+            }
+        } catch {
+            Write-Log -Level "WARN" -Message ("Failed to start dashboard natively in detached mode: {0}" -f $_.Exception.Message)
         }
     }
 
     return [pscustomobject]@{
         Opened          = $false
         Mode            = "none"
-        Reason          = "dashboard_command_missing"
-        Summary         = "No usable dashboard launch path is available for this runtime."
-        NextAction      = "Run Update or Repair first."
-        RecoveryCommand = $null
+        Reason          = if ($readyState.Disposition -eq "soft-fail") { "dashboard_open_failed" } else { "dashboard_command_missing" }
+        Summary         = if ($readyState.Disposition -eq "soft-fail") {
+            "Dashboard precheck soft-failed, but the native dashboard launcher could not be started."
+        } else {
+            "No usable dashboard launch path is available for this runtime."
+        }
+        NextAction      = if ($readyState.Disposition -eq "soft-fail") {
+            "Run Repair first, then try Start again."
+        } else {
+            "Run Update or Repair first."
+        }
+        RecoveryCommand = if ($script:Context.Capabilities.Dashboard) { "openclaw dashboard" } else { $null }
     }
 }
 
@@ -3455,19 +3553,42 @@ function Finalize-OperationalReadiness {
     }
 
     $dashboardVerification = Verify-DashboardReady -StartMode $normalizedStartMode
-    if (-not $dashboardVerification.Ready) {
-        return (Complete-Maintenance -Code $script:ExitCodes.NeedsAttention -Message "Dashboard is not ready to open." -Reason $dashboardVerification.Reason -Summary $dashboardVerification.Summary -NextAction $dashboardVerification.NextAction -RecoveryCommand "openclaw dashboard --no-open" -InstalledVersion $InstalledVersion -StateUpdates ([ordered]@{
+    $dashboardAutoRepair = [pscustomobject]@{
+        Applied           = $false
+        Reloaded          = $false
+        Steps             = @()
+        GatewayTokenState = $gatewayTokenState
+    }
+
+    if ($OpenDashboard -and $normalizedStartMode -eq "local-stable" -and $dashboardVerification.Disposition -eq "hard-fail") {
+        Write-UiStatus -Level "warn" -Message "Applying one local-safe dashboard repair..."
+        $dashboardAutoRepair = Invoke-LocalSafeDashboardAutoRepair -Verification $dashboardVerification -GatewayTokenState $gatewayTokenState
+        $gatewayTokenState = $dashboardAutoRepair.GatewayTokenState
+        if ($dashboardAutoRepair.Applied) {
+            Write-Log -Level "INFO" -Message ("Applied local-safe dashboard repair steps: {0}" -f $(if ($dashboardAutoRepair.Steps.Count -gt 0) { $dashboardAutoRepair.Steps -join ", " } else { "<none>" }))
+            Write-UiStatus -Level "info" -Message "A local-safe dashboard repair was applied. Retrying the dashboard precheck..."
+            $dashboardVerification = Verify-DashboardReady -StartMode $normalizedStartMode
+        }
+    }
+
+    if ($dashboardVerification.Disposition -eq "hard-fail") {
+        return (Complete-Maintenance -Code $script:ExitCodes.NeedsAttention -Message "Dashboard is not ready to open." -Reason $dashboardVerification.Reason -Summary $dashboardVerification.Summary -NextAction $dashboardVerification.NextAction -RecoveryCommand $(if ([string]::IsNullOrWhiteSpace("$($dashboardVerification.RecoveryCommand)")) { "openclaw dashboard --no-open" } else { $dashboardVerification.RecoveryCommand }) -InstalledVersion $InstalledVersion -StateUpdates ([ordered]@{
             gatewayTokenState = $gatewayTokenState.State
             providerAuthState = [pscustomobject](Convert-ProviderAuthState -InputObject $null)
             lastStartReason   = $dashboardVerification.Reason
-            lastDashboardMode = "verify-failed"
+            lastDashboardMode = $(if ($dashboardAutoRepair.Applied) { "auto-repair-failed" } else { "verify-hard-fail" })
             startMode         = $normalizedStartMode
         }))
     }
 
-    $dashboardMode = if ([string]::IsNullOrWhiteSpace("$($dashboardVerification.Mode)")) { "verified" } else { "verified-" + $dashboardVerification.Mode }
+    $dashboardMode = switch ("$($dashboardVerification.Disposition)") {
+        "verified-url" { "url-direct" }
+        "soft-fail"    { "soft-precheck" }
+        default        { "none" }
+    }
+    $dashboardOpenResult = $null
     if ($OpenDashboard) {
-        $dashboardOpenResult = Open-DashboardEntry -Verification $dashboardVerification -StartMode $normalizedStartMode
+        $dashboardOpenResult = Open-DashboardEntry -Verification $dashboardVerification -StartMode $normalizedStartMode -AutoRepaired:$dashboardAutoRepair.Applied
         if (-not $dashboardOpenResult.Opened) {
             return (Complete-Maintenance -Code $script:ExitCodes.NeedsAttention -Message "Dashboard failed to open." -Reason $dashboardOpenResult.Reason -Summary $dashboardOpenResult.Summary -NextAction $dashboardOpenResult.NextAction -RecoveryCommand $dashboardOpenResult.RecoveryCommand -InstalledVersion $InstalledVersion -StateUpdates ([ordered]@{
                 gatewayTokenState = $gatewayTokenState.State
@@ -3512,10 +3633,39 @@ function Finalize-OperationalReadiness {
         $summary = $message
     }
 
-    return (Complete-Maintenance -Code $SuccessCode -Message $message -Reason $SuccessReason -Summary $summary -InstalledVersion $InstalledVersion -MarkHealthy -HealthState "healthy" -StateUpdates ([ordered]@{
+    $finalReason = $SuccessReason
+    if ($OpenDashboard -and $null -ne $dashboardOpenResult) {
+        $finalReason = $dashboardOpenResult.Reason
+        switch ($dashboardOpenResult.Reason) {
+            "dashboard_url_opened" {
+                $message = "Gateway is healthy and the dashboard was opened directly."
+                $summary = "Gateway RPC health passed and the verified dashboard URL was opened directly."
+            }
+            "dashboard_native_detached_started" {
+                $message = "Gateway is healthy and the native dashboard launcher was started."
+                $summary = "Gateway RPC health passed and the native dashboard launcher was started in detached mode."
+            }
+            "dashboard_precheck_soft_failed" {
+                $message = "Dashboard precheck soft-failed, but the native dashboard launcher was started."
+                $summary = "A dashboard soft failure did not block startup; the native dashboard launcher was started in detached mode."
+            }
+            "dashboard_auto_repair_applied" {
+                $message = "A local-safe dashboard repair was applied and the dashboard was opened."
+                $summary = "The wrapper applied one local-safe repair for Gateway/dashboard drift and then opened the dashboard."
+            }
+        }
+    }
+
+    if ($OpenDashboard -and "$($providerAuth.State.status)" -eq "unknown") {
+        $finalReason = "provider_auth_unknown"
+        $message = "Dashboard opened, but provider auth could not be classified quickly."
+        $summary = "Gateway is healthy and the dashboard was opened, but provider auth classification timed out or remained inconclusive."
+    }
+
+    return (Complete-Maintenance -Code $SuccessCode -Message $message -Reason $finalReason -Summary $summary -InstalledVersion $InstalledVersion -MarkHealthy -HealthState "healthy" -StateUpdates ([ordered]@{
         gatewayTokenState = $gatewayTokenState.State
         providerAuthState = $providerAuth.State
-        lastStartReason   = $SuccessReason
+        lastStartReason   = $finalReason
         lastDashboardMode = $dashboardMode
         startMode         = $normalizedStartMode
     }))

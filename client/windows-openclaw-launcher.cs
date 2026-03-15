@@ -12,7 +12,8 @@ using System.Windows.Forms;
 
 internal static class Program
 {
-    private const int StartTimeoutSeconds = 360;
+    private const int StartIdleTimeoutSeconds = 180;
+    private const int StartHardCapSeconds = 900;
     private const int RepairTimeoutSeconds = 600;
     private const int UpdateTimeoutSeconds = 3600;
     private const string UiPrefix = "OPENCLAW_UI ";
@@ -599,7 +600,7 @@ internal static class Program
             case MaintenanceMode.Repair:
                 return RepairTimeoutSeconds;
             default:
-                return StartTimeoutSeconds;
+                return StartHardCapSeconds;
         }
     }
 
@@ -749,6 +750,7 @@ internal static class Program
         private System.Windows.Forms.Timer timeoutTimer;
         private System.Windows.Forms.Timer autoCloseTimer;
         private DateTime startedAtUtc;
+        private long lastActivityUtcTicks;
         private bool completed;
         private UiEvent pendingResult;
         private int exitCode = 1;
@@ -989,6 +991,7 @@ internal static class Program
                 AppendLog(T("正在启动维护脚本。", "Starting maintenance script."));
                 Log(logPath, T("启动命令：", "Running: ") + powerShellPath + " " + argumentString);
                 startedAtUtc = DateTime.UtcNow;
+                lastActivityUtcTicks = startedAtUtc.Ticks;
                 process.Start();
                 process.BeginOutputReadLine();
                 process.BeginErrorReadLine();
@@ -1025,27 +1028,52 @@ internal static class Program
                     return;
                 }
 
-                TimeSpan elapsed = DateTime.UtcNow - startedAtUtc;
+                DateTime now = DateTime.UtcNow;
+                TimeSpan elapsed = now - startedAtUtc;
+                if (mode == MaintenanceMode.Start)
+                {
+                    TimeSpan idleElapsed = now - new DateTime(Interlocked.Read(ref lastActivityUtcTicks), DateTimeKind.Utc);
+                    if (idleElapsed.TotalSeconds >= StartIdleTimeoutSeconds)
+                    {
+                        HandleTimeout(
+                            "start_idle_timeout",
+                            T("启动流程长时间无新活动，已停止维护进程。", "Start went idle for too long and the maintenance process was stopped."),
+                            T("启动流程长时间无新活动，请查看日志后重试。", "Start went idle for too long. Check the log and try again."));
+                        return;
+                    }
+
+                    if (elapsed.TotalSeconds < StartHardCapSeconds)
+                    {
+                        return;
+                    }
+
+                    HandleTimeout(
+                        "start_hard_cap_timeout",
+                        T("启动流程超过硬上限，已停止维护进程。", "Start exceeded the hard cap and the maintenance process was stopped."),
+                        T("启动流程超出最大时长，请查看日志后重试。", "Start exceeded the maximum runtime. Check the log and try again."));
+                    return;
+                }
+
                 if (elapsed.TotalSeconds < GetTimeoutSeconds(mode))
                 {
                     return;
                 }
 
-                try
-                {
-                    process.Kill();
-                }
-                catch
-                {
-                }
-
-                AppendLog(T("维护进程执行超时。", "Maintenance timed out."));
-                CompleteWindow(124, T("执行超时，请查看日志后重试。", "Maintenance timed out. Check the log and try again."), VisualState.Warning, true);
+                HandleTimeout(
+                    "maintenance_timeout",
+                    T("维护进程执行超时。", "Maintenance timed out."),
+                    T("执行超时，请查看日志后重试。", "Maintenance timed out. Check the log and try again."));
             };
             timeoutTimer.Start();
         }
         private void HandleOutputDataReceived(object sender, DataReceivedEventArgs e)
         {
+            if (e.Data == null)
+            {
+                return;
+            }
+
+            MarkActivity();
             if (string.IsNullOrWhiteSpace(e.Data))
             {
                 return;
@@ -1056,6 +1084,12 @@ internal static class Program
 
         private void HandleErrorDataReceived(object sender, DataReceivedEventArgs e)
         {
+            if (e.Data == null)
+            {
+                return;
+            }
+
+            MarkActivity();
             if (string.IsNullOrWhiteSpace(e.Data))
             {
                 return;
@@ -1121,6 +1155,7 @@ internal static class Program
                     return false;
                 }
 
+                MarkActivity();
                 string eventType = uiEvent.type.Trim().ToLowerInvariant();
                 if (eventType == "phase")
                 {
@@ -1153,6 +1188,38 @@ internal static class Program
             {
                 return false;
             }
+        }
+
+        private void MarkActivity()
+        {
+            Interlocked.Exchange(ref lastActivityUtcTicks, DateTime.UtcNow.Ticks);
+        }
+
+        private void HandleTimeout(string reason, string logMessage, string statusMessage)
+        {
+            pendingResult = new UiEvent
+            {
+                type = "result",
+                code = 124,
+                reason = reason,
+                message = statusMessage,
+                summary = statusMessage
+            };
+
+            try
+            {
+                if (process != null && !process.HasExited)
+                {
+                    process.Kill();
+                }
+            }
+            catch
+            {
+            }
+
+            AppendLog(logMessage);
+            AppendResultDetails(pendingResult);
+            CompleteWindow(124, statusMessage, VisualState.Warning, true);
         }
 
         private static bool TryParseUiEvent(string json, out UiEvent uiEvent)
