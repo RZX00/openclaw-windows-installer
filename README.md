@@ -34,6 +34,15 @@ Remote access guidance:
 
 `OpenClaw-Update.exe` and `OpenClaw-Repair.exe` reuse the same post-validation path for capability cache refresh, token checks, RPC health verification, dashboard verification, and provider-auth classification.
 
+## Reach Pack
+
+`OpenClaw-Reach-Pack.exe` is an **add-on package** for an existing Windows OpenClaw install.
+
+- install `OpenClaw-Setup-Windows-x64.exe` first
+- then run `OpenClaw-Reach-Pack.exe`
+- the Reach pack now fails fast when the main install is missing, instead of silently unpacking for a long time and only failing later
+- the Reach self-extractor now shows a visible progress window during payload extraction and unpacking
+
 ## 项目定位
 
 这个仓库不是 OpenClaw 官方主仓，而是一个专门为 **Windows 直装体验** 做的包装层项目。

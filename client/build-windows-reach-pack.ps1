@@ -609,10 +609,13 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Drawing;
 using System.IO;
 using System.IO.Compression;
 using System.Security.Principal;
 using System.Text;
+using System.Web.Script.Serialization;
+using System.Windows.Forms;
 
 public static class Program
 {
@@ -630,6 +633,7 @@ public static class Program
     {
         Console.OutputEncoding = Encoding.UTF8;
         string extractRoot = null;
+        ProgressForm progressForm = null;
 
         try
         {
@@ -638,14 +642,34 @@ public static class Program
                 return ElevateSelf(args);
             }
 
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+
+            string openClawRoot;
+            string preflightFailure;
+            if (!TryEnsureMainInstall(out openClawRoot, out preflightFailure))
+            {
+                MessageBox.Show(
+                    preflightFailure,
+                    "OpenClaw Reach Pack",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                return 1;
+            }
+
+            progressForm = new ProgressForm();
+            progressForm.Show();
+            progressForm.Activate();
+            progressForm.ReportStatus("Preparing Reach Pack...", 0, openClawRoot);
+
             string exePath = Process.GetCurrentProcess().MainModule.FileName;
             extractRoot = Path.Combine(Path.GetTempPath(), "openclaw-reach-pack-run-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(extractRoot);
             string payloadZipPath = Path.Combine(extractRoot, "payload.zip");
-            ExtractPayload(exePath, payloadZipPath);
-            ExtractZipWithProgress(payloadZipPath, extractRoot);
+            ExtractPayload(exePath, payloadZipPath, progressForm);
+            ExtractZipWithProgress(payloadZipPath, extractRoot, progressForm);
             TryDelete(payloadZipPath);
-            Console.WriteLine("[INFO] " + StartingInstallMessage + "...");
+            progressForm.ReportStatus(StartingInstallMessage + "...", 100, "Launching installer window");
 
             string runInstallPath = Path.Combine(extractRoot, "run-install.cmd");
             if (!File.Exists(runInstallPath))
@@ -656,8 +680,12 @@ public static class Program
             ProcessStartInfo startInfo = new ProcessStartInfo("cmd.exe", "/d /s /c \"\"" + runInstallPath + "\"\"")
             {
                 WorkingDirectory = extractRoot,
-                UseShellExecute = false
+                UseShellExecute = true,
+                WindowStyle = ProcessWindowStyle.Normal
             };
+
+            progressForm.Close();
+            progressForm = null;
 
             using (Process process = Process.Start(startInfo))
             {
@@ -673,14 +701,98 @@ public static class Program
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine("[ERROR] " + ex.Message);
-            Console.Error.WriteLine(ex.ToString());
-            Console.WriteLine();
-            Console.Write(ClosePrompt);
-            Console.ReadKey(true);
+            if (progressForm != null)
+            {
+                progressForm.Close();
+                progressForm = null;
+            }
+
+            MessageBox.Show(
+                ex.Message,
+                "OpenClaw Reach Pack",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
             TryDeleteDirectory(extractRoot);
             return 1;
         }
+    }
+
+    private static bool TryEnsureMainInstall(out string openClawRoot, out string failureMessage)
+    {
+        string defaultRoot = GetDefaultOpenClawRoot();
+        string installStatePath = Path.Combine(defaultRoot, "install-state.json");
+        if (!File.Exists(installStatePath))
+        {
+            openClawRoot = defaultRoot;
+            failureMessage = "Reach Pack is an add-on package. Install OpenClaw-Setup-Windows-x64.exe first, then run Reach Pack again.";
+            return false;
+        }
+
+        openClawRoot = ResolveOpenClawRoot(defaultRoot, installStatePath);
+        string wrapperPath = Path.Combine(openClawRoot, "bin", "openclaw.cmd");
+        if (!File.Exists(wrapperPath))
+        {
+            failureMessage = "The main OpenClaw installation was not found or is incomplete. Run OpenClaw-Setup-Windows-x64.exe or OpenClaw-Repair.exe first.";
+            return false;
+        }
+
+        failureMessage = null;
+        return true;
+    }
+
+    private static string GetDefaultOpenClawRoot()
+    {
+        string programData = Environment.GetEnvironmentVariable("ProgramData");
+        if (string.IsNullOrWhiteSpace(programData))
+        {
+            programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+        }
+
+        if (string.IsNullOrWhiteSpace(programData))
+        {
+            programData = @"C:\ProgramData";
+        }
+
+        return Path.Combine(programData, "OpenClaw");
+    }
+
+    private static string ResolveOpenClawRoot(string defaultRoot, string installStatePath)
+    {
+        try
+        {
+            string json = File.ReadAllText(installStatePath);
+            JavaScriptSerializer serializer = new JavaScriptSerializer();
+            object payload = serializer.DeserializeObject(json);
+            Dictionary<string, object> dictionary = payload as Dictionary<string, object>;
+            string dataRoot = TryGetString(dictionary, "dataRoot");
+            if (!string.IsNullOrWhiteSpace(dataRoot))
+            {
+                return dataRoot;
+            }
+        }
+        catch
+        {
+        }
+
+        return defaultRoot;
+    }
+
+    private static string TryGetString(Dictionary<string, object> dictionary, string key)
+    {
+        if (dictionary == null || string.IsNullOrWhiteSpace(key))
+        {
+            return string.Empty;
+        }
+
+        foreach (KeyValuePair<string, object> entry in dictionary)
+        {
+            if (string.Equals(entry.Key, key, StringComparison.OrdinalIgnoreCase))
+            {
+                return entry.Value == null ? string.Empty : Convert.ToString(entry.Value);
+            }
+        }
+
+        return string.Empty;
     }
 
     private static bool IsAdministrator()
@@ -837,7 +949,7 @@ public static class Program
         return builder.ToString();
     }
 
-    private static void ExtractPayload(string exePath, string payloadZipPath)
+    private static void ExtractPayload(string exePath, string payloadZipPath, ProgressForm progressForm)
     {
         using (FileStream input = File.OpenRead(exePath))
         {
@@ -869,7 +981,7 @@ public static class Program
             input.Seek(payloadOffset, SeekOrigin.Begin);
             using (FileStream output = File.Create(payloadZipPath))
             {
-                CopyExactly(input, output, payloadSize, PayloadExtractMessage);
+                CopyExactly(input, output, payloadSize, PayloadExtractMessage, progressForm);
             }
         }
     }
@@ -889,7 +1001,7 @@ public static class Program
         }
     }
 
-    private static void CopyExactly(Stream input, Stream output, long bytesToCopy, string activity)
+    private static void CopyExactly(Stream input, Stream output, long bytesToCopy, string activity, ProgressForm progressForm)
     {
         byte[] buffer = new byte[1024 * 1024];
         long remaining = bytesToCopy;
@@ -908,14 +1020,14 @@ public static class Program
             output.Write(buffer, 0, read);
             remaining -= read;
             copied += read;
-            lastPercent = RenderProgress(activity, copied, bytesToCopy, lastPercent, null);
+            lastPercent = RenderProgress(activity, copied, bytesToCopy, lastPercent, null, progressForm);
         }
 
-        RenderProgress(activity, bytesToCopy, bytesToCopy, lastPercent, null);
+        RenderProgress(activity, bytesToCopy, bytesToCopy, lastPercent, null, progressForm);
         Console.WriteLine();
     }
 
-    private static void ExtractZipWithProgress(string zipPath, string destination)
+    private static void ExtractZipWithProgress(string zipPath, string destination, ProgressForm progressForm)
     {
         using (ZipArchive archive = ZipFile.OpenRead(zipPath))
         {
@@ -951,15 +1063,15 @@ public static class Program
 
                 entry.ExtractToFile(targetPath, true);
                 processedFiles++;
-                lastPercent = RenderProgress(PayloadUnpackMessage, processedFiles, totalFiles, lastPercent, processedFiles + "/" + totalFiles);
+                lastPercent = RenderProgress(PayloadUnpackMessage, processedFiles, totalFiles, lastPercent, processedFiles + "/" + totalFiles, progressForm);
             }
 
-            RenderProgress(PayloadUnpackMessage, totalFiles, totalFiles, lastPercent, totalFiles + "/" + totalFiles);
+            RenderProgress(PayloadUnpackMessage, totalFiles, totalFiles, lastPercent, totalFiles + "/" + totalFiles, progressForm);
             Console.WriteLine();
         }
     }
 
-    private static int RenderProgress(string activity, long current, long total, int lastPercent, string suffix)
+    private static int RenderProgress(string activity, long current, long total, int lastPercent, string suffix, ProgressForm progressForm)
     {
         if (total <= 0)
         {
@@ -967,6 +1079,11 @@ public static class Program
         }
 
         int percent = (int)Math.Max(0, Math.Min(100, (current * 100L) / total));
+        if (progressForm != null)
+        {
+            progressForm.ReportStatus(activity, percent, suffix);
+        }
+
         if (percent == lastPercent && current < total)
         {
             return lastPercent;
@@ -1010,6 +1127,71 @@ public static class Program
         }
     }
 
+}
+
+internal sealed class ProgressForm : Form
+{
+    private readonly Label titleLabel;
+    private readonly Label detailLabel;
+    private readonly ProgressBar progressBar;
+
+    public ProgressForm()
+    {
+        Text = "OpenClaw Reach Pack";
+        StartPosition = FormStartPosition.CenterScreen;
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = false;
+        MinimizeBox = false;
+        ControlBox = false;
+        ShowIcon = false;
+        ShowInTaskbar = true;
+        TopMost = true;
+        BackColor = Color.White;
+        ClientSize = new Size(520, 148);
+        Font = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
+
+        titleLabel = new Label();
+        titleLabel.Left = 20;
+        titleLabel.Top = 20;
+        titleLabel.Width = 480;
+        titleLabel.Height = 26;
+        titleLabel.Font = new Font("Segoe UI Semibold", 12F, FontStyle.Bold, GraphicsUnit.Point);
+        titleLabel.Text = "Preparing Reach Pack...";
+        Controls.Add(titleLabel);
+
+        detailLabel = new Label();
+        detailLabel.Left = 20;
+        detailLabel.Top = 52;
+        detailLabel.Width = 480;
+        detailLabel.Height = 34;
+        detailLabel.ForeColor = Color.FromArgb(88, 96, 105);
+        detailLabel.Text = "Starting...";
+        Controls.Add(detailLabel);
+
+        progressBar = new ProgressBar();
+        progressBar.Left = 20;
+        progressBar.Top = 98;
+        progressBar.Width = 480;
+        progressBar.Height = 20;
+        progressBar.Minimum = 0;
+        progressBar.Maximum = 100;
+        progressBar.Style = ProgressBarStyle.Continuous;
+        Controls.Add(progressBar);
+    }
+
+    public void ReportStatus(string activity, int percent, string detail)
+    {
+        if (IsDisposed)
+        {
+            return;
+        }
+
+        titleLabel.Text = string.IsNullOrWhiteSpace(activity) ? "Preparing Reach Pack..." : activity;
+        progressBar.Value = Math.Max(progressBar.Minimum, Math.Min(progressBar.Maximum, percent));
+        detailLabel.Text = string.IsNullOrWhiteSpace(detail) ? (percent.ToString() + "%") : detail;
+        Refresh();
+        Application.DoEvents();
+    }
 }
 '@
 
