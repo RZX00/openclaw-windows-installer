@@ -14,6 +14,26 @@
   <a href="https://github.com/openclaw/openclaw"><img alt="Based on OpenClaw" src="https://img.shields.io/badge/based%20on-OpenClaw-2563eb?style=flat-square" /></a>
 </p>
 
+## One-click Start Model
+
+`OpenClaw-Start.exe` is now defined as a **local-host startup path**:
+
+- ensure a persistent Gateway on the gateway host
+- verify RPC health
+- verify dashboard readiness
+- open the dashboard through native `openclaw dashboard`
+- classify `Gateway token` and `Provider auth` separately
+
+Default mode is `local-stable`. The wrapper no longer treats LAN HTTP, remote proxying, and local loopback as the same one-click path.
+
+Remote access guidance:
+
+- preferred: `Tailscale Serve HTTPS`
+- preferred: `SSH tunnel`
+- breakglass only: plain LAN HTTP with explicit `gateway.controlUi.allowedOrigins`
+
+`OpenClaw-Update.exe` and `OpenClaw-Repair.exe` reuse the same post-validation path for capability cache refresh, token checks, RPC health verification, dashboard verification, and provider-auth classification.
+
 ## 项目定位
 
 这个仓库不是 OpenClaw 官方主仓，而是一个专门为 **Windows 直装体验** 做的包装层项目。

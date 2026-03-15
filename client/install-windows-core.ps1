@@ -3413,6 +3413,46 @@ function Save-InstallState {
         licenseProduct        = $script:Installer.LicenseProduct
         runtimeControlMode    = $script:Installer.RuntimeControlMode
         lastLicenseCheckAt    = $null
+        startMode             = "local-stable"
+        capabilities          = [ordered]@{
+            DaemonStatusJson         = $false
+            StatusDeep               = $false
+            StatusAll                = $false
+            HealthJson               = $false
+            GatewayStatusRequireRpc  = $false
+            GatewayStatusJson        = $false
+            GatewayStatus            = $false
+            GatewayInstall           = $false
+            GatewayStart             = $false
+            GatewayStop              = $false
+            GatewayRestart           = $false
+            DoctorRepair             = $false
+            DoctorNonInteractive     = $false
+            DoctorGenerateGatewayToken = $false
+            Dashboard                = $false
+            DashboardNoOpen          = $false
+            ModelsStatusJson         = $false
+            ModelsStatusPlain        = $false
+            ModelsStatusCheck        = $false
+            ModelsAuthAdd            = $false
+            ModelsAuthLogin          = $false
+            ModelsAuthSetupToken     = $false
+        }
+        capabilitiesRuntimeVersion = $null
+        gatewayTokenState     = [ordered]@{
+            status  = "unknown"
+            mode    = "token"
+            source  = "unknown"
+            message = $null
+        }
+        providerAuthState     = [ordered]@{
+            status   = "unknown"
+            provider = $null
+            source   = "unknown"
+            message  = $null
+        }
+        lastStartReason       = $null
+        lastDashboardMode     = "none"
         launcherPath          = $script:Installer.LauncherPath
         maintenanceExecutablePath = $script:Installer.MaintenanceExecutablePath
         desktopStartPath      = $script:Installer.DesktopStartPath

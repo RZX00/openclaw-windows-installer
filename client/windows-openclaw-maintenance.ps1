@@ -37,20 +37,28 @@ $script:Context = [ordered]@{
     State        = $null
     TempRoot     = Join-Path $env:TEMP ("openclaw-maintenance-" + [guid]::NewGuid().ToString("N"))
     Capabilities = [ordered]@{
-        DaemonStatusJson      = $false
-        StatusDeep           = $false
-        StatusAll            = $false
-        HealthJson           = $false
+        DaemonStatusJson         = $false
+        StatusDeep               = $false
+        StatusAll                = $false
+        HealthJson               = $false
         GatewayStatusRequireRpc = $false
-        GatewayStatusJson    = $false
-        GatewayStatus        = $false
-        GatewayInstall       = $false
-        GatewayStart         = $false
-        GatewayStop          = $false
-        GatewayRestart       = $false
-        DoctorRepair         = $false
-        DoctorNonInteractive = $false
-        Dashboard            = $false
+        GatewayStatusJson       = $false
+        GatewayStatus           = $false
+        GatewayInstall          = $false
+        GatewayStart            = $false
+        GatewayStop             = $false
+        GatewayRestart          = $false
+        DoctorRepair            = $false
+        DoctorNonInteractive    = $false
+        DoctorGenerateGatewayToken = $false
+        Dashboard               = $false
+        DashboardNoOpen         = $false
+        ModelsStatusJson        = $false
+        ModelsStatusPlain       = $false
+        ModelsStatusCheck       = $false
+        ModelsAuthAdd           = $false
+        ModelsAuthLogin         = $false
+        ModelsAuthSetupToken    = $false
     }
 }
 
@@ -333,6 +341,147 @@ function Write-UiStatus {
     })
 }
 
+function Get-DefaultCapabilities {
+    return [ordered]@{
+        DaemonStatusJson         = $false
+        StatusDeep               = $false
+        StatusAll                = $false
+        HealthJson               = $false
+        GatewayStatusRequireRpc  = $false
+        GatewayStatusJson        = $false
+        GatewayStatus            = $false
+        GatewayInstall           = $false
+        GatewayStart             = $false
+        GatewayStop              = $false
+        GatewayRestart           = $false
+        DoctorRepair             = $false
+        DoctorNonInteractive     = $false
+        DoctorGenerateGatewayToken = $false
+        Dashboard                = $false
+        DashboardNoOpen          = $false
+        ModelsStatusJson         = $false
+        ModelsStatusPlain        = $false
+        ModelsStatusCheck        = $false
+        ModelsAuthAdd            = $false
+        ModelsAuthLogin          = $false
+        ModelsAuthSetupToken     = $false
+    }
+}
+
+function Get-DefaultGatewayTokenState {
+    return [ordered]@{
+        status  = "unknown"
+        mode    = "token"
+        source  = "unknown"
+        message = $null
+    }
+}
+
+function Get-DefaultProviderAuthState {
+    return [ordered]@{
+        status   = "unknown"
+        provider = $null
+        source   = "unknown"
+        message  = $null
+    }
+}
+
+function Convert-StateLikeToOrderedMap {
+    param(
+        [object]$InputObject,
+        [hashtable]$Defaults = $null
+    )
+
+    $payload = [ordered]@{}
+    if ($Defaults) {
+        foreach ($entry in $Defaults.GetEnumerator()) {
+            $payload[$entry.Key] = $entry.Value
+        }
+    }
+
+    if ($null -eq $InputObject) {
+        return $payload
+    }
+
+    if ($InputObject -is [System.Collections.IDictionary]) {
+        foreach ($key in $InputObject.Keys) {
+            $payload["$key"] = $InputObject[$key]
+        }
+
+        return $payload
+    }
+
+    foreach ($property in $InputObject.PSObject.Properties) {
+        $payload[$property.Name] = $property.Value
+    }
+
+    return $payload
+}
+
+function Convert-CapabilityState {
+    param([object]$InputObject)
+
+    $defaults = Get-DefaultCapabilities
+    $payload = Convert-StateLikeToOrderedMap -InputObject $InputObject -Defaults $defaults
+    foreach ($key in @($defaults.Keys)) {
+        $payload[$key] = [bool]$payload[$key]
+    }
+
+    return $payload
+}
+
+function Convert-GatewayTokenState {
+    param([object]$InputObject)
+
+    $defaults = Get-DefaultGatewayTokenState
+    $payload = Convert-StateLikeToOrderedMap -InputObject $InputObject -Defaults $defaults
+    if ([string]::IsNullOrWhiteSpace("$($payload.status)")) {
+        $payload.status = "unknown"
+    }
+    if ([string]::IsNullOrWhiteSpace("$($payload.mode)")) {
+        $payload.mode = "token"
+    }
+    if ([string]::IsNullOrWhiteSpace("$($payload.source)")) {
+        $payload.source = "unknown"
+    }
+    if ($payload.Contains("message") -and [string]::IsNullOrWhiteSpace("$($payload.message)")) {
+        $payload.message = $null
+    }
+
+    return $payload
+}
+
+function Convert-ProviderAuthState {
+    param([object]$InputObject)
+
+    $defaults = Get-DefaultProviderAuthState
+    $payload = Convert-StateLikeToOrderedMap -InputObject $InputObject -Defaults $defaults
+    if ([string]::IsNullOrWhiteSpace("$($payload.status)")) {
+        $payload.status = "unknown"
+    }
+    if ([string]::IsNullOrWhiteSpace("$($payload.source)")) {
+        $payload.source = "unknown"
+    }
+    if ($payload.Contains("provider") -and [string]::IsNullOrWhiteSpace("$($payload.provider)")) {
+        $payload.provider = $null
+    }
+    if ($payload.Contains("message") -and [string]::IsNullOrWhiteSpace("$($payload.message)")) {
+        $payload.message = $null
+    }
+
+    return $payload
+}
+
+function Get-NormalizedStartMode {
+    param([string]$Value)
+
+    $normalized = "$Value".Trim().ToLowerInvariant()
+    switch ($normalized) {
+        "lan-breakglass" { return "lan-breakglass" }
+        default          { return "local-stable" }
+    }
+}
+
 function Get-DefaultResultMessage {
     param(
         [int]$Code,
@@ -357,24 +506,52 @@ function Get-DefaultResultMessage {
 function Complete-Maintenance {
     param(
         [int]$Code,
-        [string]$Message = $null
+        [string]$Message = $null,
+        [string]$Reason = $null,
+        [string]$Summary = $null,
+        [string]$NextAction = $null,
+        [string]$RecoveryCommand = $null,
+        [string]$InstalledVersion = $null,
+        [switch]$MarkHealthy,
+        [string]$HealthState = $null,
+        [object]$StateUpdates = $null
     )
 
     if ([string]::IsNullOrWhiteSpace($Message)) {
         $Message = Get-DefaultResultMessage -Code $Code
     }
+    if ([string]::IsNullOrWhiteSpace($Summary)) {
+        $Summary = $Message
+    }
 
     try {
-        Persist-InstallState -HealthState (Resolve-LastHealthStateForExitCode -Code $Code)
+        $persistHealthState = if ([string]::IsNullOrWhiteSpace($HealthState)) {
+            Resolve-LastHealthStateForExitCode -Code $Code
+        } else {
+            $HealthState
+        }
+        Persist-InstallState -InstalledVersion $InstalledVersion -MarkHealthy:$MarkHealthy -HealthState $persistHealthState -StateUpdates $StateUpdates
     } catch {
         Write-Log -Level "WARN" -Message ("Failed to persist maintenance result state: {0}" -f $_.Exception.Message)
     }
 
-    Write-UiEvent -Payload ([ordered]@{
+    $payload = [ordered]@{
         type    = "result"
         code    = $Code
         message = $Message
-    })
+        summary = $Summary
+    }
+    if (-not [string]::IsNullOrWhiteSpace($Reason)) {
+        $payload.reason = $Reason
+    }
+    if (-not [string]::IsNullOrWhiteSpace($NextAction)) {
+        $payload.nextAction = $NextAction
+    }
+    if (-not [string]::IsNullOrWhiteSpace($RecoveryCommand)) {
+        $payload.recoveryCommand = $RecoveryCommand
+    }
+
+    Write-UiEvent -Payload $payload
 
     return $Code
 }
@@ -674,37 +851,44 @@ function Invoke-CmdFileCapture {
 
 function Get-DefaultInstallState {
     return [ordered]@{
-        schemaVersion         = 1
-        locale                = "zh-CN"
-        channel               = "latest"
-        installMode           = "auto"
-        installMethod         = "bundle"
-        mirror                = "auto"
-        artifactBaseUrl       = [Environment]::GetEnvironmentVariable("OPENCLAW_ARTIFACT_BASE_URL")
-        architecture          = Get-SystemArchitecture
-        installedVersion      = $null
-        lastKnownGoodVersion  = $null
-        lastHealthState       = "unknown"
-        dataRoot              = $script:Context.DataRoot
-        bundleRoot            = Join-Path $script:Context.DataRoot "bundles"
-        sourceRoot            = Join-Path $script:Context.DataRoot "source"
-        toolRoot              = Join-Path $script:Context.DataRoot "tools"
-        wrapperDir            = $script:Context.WrapperDir
-        wrapperPath           = Join-Path $script:Context.WrapperDir "openclaw.cmd"
-        supportDir            = $script:Context.SupportRoot
-        coreInstallerPath     = Join-Path $script:Context.SupportRoot "install-windows-core.ps1"
-        maintenanceScriptPath = Join-Path $script:Context.SupportRoot "OpenClaw-Maintenance.ps1"
-        licenseExecutablePath = Join-Path $script:Context.WrapperDir "OpenClaw-License.exe"
-        licenseStatePath      = Join-Path $script:Context.DataRoot "license-state.json"
-        licenseStatus         = "unknown"
-        licenseApiBaseUrl     = [Environment]::GetEnvironmentVariable("OPENCLAW_LICENSE_API_BASE_URL")
-        licenseProduct        = "windows-open"
-        runtimeControlMode    = "none"
-        lastLicenseCheckAt    = $null
-        commandType           = $null
-        commandTarget         = $null
-        portableNodeDir       = $null
-        companionCommands     = @()
+        schemaVersion             = 1
+        locale                    = "zh-CN"
+        channel                   = "latest"
+        installMode               = "auto"
+        installMethod             = "bundle"
+        mirror                    = "auto"
+        artifactBaseUrl           = [Environment]::GetEnvironmentVariable("OPENCLAW_ARTIFACT_BASE_URL")
+        architecture              = Get-SystemArchitecture
+        installedVersion          = $null
+        lastKnownGoodVersion      = $null
+        lastHealthState           = "unknown"
+        dataRoot                  = $script:Context.DataRoot
+        bundleRoot                = Join-Path $script:Context.DataRoot "bundles"
+        sourceRoot                = Join-Path $script:Context.DataRoot "source"
+        toolRoot                  = Join-Path $script:Context.DataRoot "tools"
+        wrapperDir                = $script:Context.WrapperDir
+        wrapperPath               = Join-Path $script:Context.WrapperDir "openclaw.cmd"
+        supportDir                = $script:Context.SupportRoot
+        coreInstallerPath         = Join-Path $script:Context.SupportRoot "install-windows-core.ps1"
+        maintenanceScriptPath     = Join-Path $script:Context.SupportRoot "OpenClaw-Maintenance.ps1"
+        licenseExecutablePath     = Join-Path $script:Context.WrapperDir "OpenClaw-License.exe"
+        licenseStatePath          = Join-Path $script:Context.DataRoot "license-state.json"
+        licenseStatus             = "unknown"
+        licenseApiBaseUrl         = [Environment]::GetEnvironmentVariable("OPENCLAW_LICENSE_API_BASE_URL")
+        licenseProduct            = "windows-open"
+        runtimeControlMode        = "none"
+        lastLicenseCheckAt        = $null
+        commandType               = $null
+        commandTarget             = $null
+        portableNodeDir           = $null
+        companionCommands         = @()
+        startMode                 = "local-stable"
+        capabilities              = [pscustomobject](Convert-CapabilityState -InputObject $null)
+        capabilitiesRuntimeVersion = $null
+        gatewayTokenState         = [pscustomobject](Convert-GatewayTokenState -InputObject $null)
+        providerAuthState         = [pscustomobject](Convert-ProviderAuthState -InputObject $null)
+        lastStartReason           = $null
+        lastDashboardMode         = "none"
     }
 }
 
@@ -792,6 +976,19 @@ function Resolve-InstallState {
     if ([string]::IsNullOrWhiteSpace("$($state.licenseStatus)")) {
         $state.licenseStatus = "unknown"
     }
+    $state.startMode = Get-NormalizedStartMode -Value "$($state.startMode)"
+    $state.capabilities = [pscustomobject](Convert-CapabilityState -InputObject (Get-StateProperty -State $state -Name "capabilities"))
+    if ([string]::IsNullOrWhiteSpace("$($state.capabilitiesRuntimeVersion)")) {
+        $state.capabilitiesRuntimeVersion = $null
+    }
+    $state.gatewayTokenState = [pscustomobject](Convert-GatewayTokenState -InputObject (Get-StateProperty -State $state -Name "gatewayTokenState"))
+    $state.providerAuthState = [pscustomobject](Convert-ProviderAuthState -InputObject (Get-StateProperty -State $state -Name "providerAuthState"))
+    if ([string]::IsNullOrWhiteSpace("$($state.lastDashboardMode)")) {
+        $state.lastDashboardMode = "none"
+    }
+    if ([string]::IsNullOrWhiteSpace("$($state.lastStartReason)")) {
+        $state.lastStartReason = $null
+    }
     if ([string]::IsNullOrWhiteSpace("$($state.runtimeControlMode)")) {
         $state.runtimeControlMode = "none"
     }
@@ -813,7 +1010,8 @@ function Persist-InstallState {
     param(
         [string]$InstalledVersion = $null,
         [switch]$MarkHealthy,
-        [string]$HealthState = $null
+        [string]$HealthState = $null,
+        [object]$StateUpdates = $null
     )
 
     $state = Resolve-InstallState
@@ -841,6 +1039,18 @@ function Persist-InstallState {
         $payload.lastHealthState = "unknown"
     }
 
+    if ($null -ne $StateUpdates) {
+        if ($StateUpdates -is [System.Collections.IDictionary]) {
+            foreach ($key in $StateUpdates.Keys) {
+                $payload["$key"] = $StateUpdates[$key]
+            }
+        } else {
+            foreach ($property in $StateUpdates.PSObject.Properties) {
+                $payload[$property.Name] = $property.Value
+            }
+        }
+    }
+
     $payload.dataRoot = Get-StateProperty -State $state -Name "dataRoot" -Default $script:Context.DataRoot
     $payload.bundleRoot = Get-StateProperty -State $state -Name "bundleRoot" -Default (Join-Path $payload.dataRoot "bundles")
     $payload.sourceRoot = Get-StateProperty -State $state -Name "sourceRoot" -Default (Join-Path $payload.dataRoot "source")
@@ -853,6 +1063,19 @@ function Persist-InstallState {
     $payload.licenseStatePath = Get-StateProperty -State $state -Name "licenseStatePath" -Default (Join-Path $script:Context.DataRoot "license-state.json")
     $payload.runtimeControlMode = Get-StateProperty -State $state -Name "runtimeControlMode" -Default "none"
     $payload.licenseProduct = Get-StateProperty -State $state -Name "licenseProduct" -Default $(if ("$($payload.runtimeControlMode)".ToLowerInvariant() -eq "server-enforced") { "windows-licensed" } else { "windows-open" })
+    $payload.startMode = Get-NormalizedStartMode -Value "$($payload.startMode)"
+    $payload.capabilities = [pscustomobject](Convert-CapabilityState -InputObject $payload.capabilities)
+    if ([string]::IsNullOrWhiteSpace("$($payload.capabilitiesRuntimeVersion)")) {
+        $payload.capabilitiesRuntimeVersion = $null
+    }
+    $payload.gatewayTokenState = [pscustomobject](Convert-GatewayTokenState -InputObject $payload.gatewayTokenState)
+    $payload.providerAuthState = [pscustomobject](Convert-ProviderAuthState -InputObject $payload.providerAuthState)
+    if ([string]::IsNullOrWhiteSpace("$($payload.lastDashboardMode)")) {
+        $payload.lastDashboardMode = "none"
+    }
+    if ([string]::IsNullOrWhiteSpace("$($payload.lastStartReason)")) {
+        $payload.lastStartReason = $null
+    }
     $payload.updatedAt = (Get-Date).ToString("o")
 
     Ensure-Directory -Path ([IO.Path]::GetDirectoryName($script:Context.StatePath))
@@ -1462,22 +1685,76 @@ function Test-OpenClawCommandSupport {
 }
 
 function Resolve-Capabilities {
-    $script:Context.Capabilities.DaemonStatusJson = Test-OpenClawCommandSupport -Arguments @("daemon", "status", "--json")
-    $script:Context.Capabilities.StatusDeep = Test-OpenClawCommandSupport -Arguments @("status", "--deep")
-    $script:Context.Capabilities.StatusAll = Test-OpenClawCommandSupport -Arguments @("status", "--all")
-    $script:Context.Capabilities.HealthJson = Test-OpenClawCommandSupport -Arguments @("health", "--json", "--timeout", "1000")
-    $script:Context.Capabilities.GatewayStatusRequireRpc = Test-OpenClawCommandSupport -Arguments @("gateway", "status", "--json", "--require-rpc")
-    $script:Context.Capabilities.GatewayStatusJson = Test-OpenClawCommandSupport -Arguments @("gateway", "status", "--json")
-    $script:Context.Capabilities.GatewayStatus = Test-OpenClawCommandSupport -Arguments @("gateway", "status")
-    $script:Context.Capabilities.GatewayInstall = Test-OpenClawCommandSupport -Arguments @("gateway", "install", "--force")
-    $script:Context.Capabilities.GatewayStart = Test-OpenClawCommandSupport -Arguments @("gateway", "start")
-    $script:Context.Capabilities.GatewayStop = Test-OpenClawCommandSupport -Arguments @("gateway", "stop")
-    $script:Context.Capabilities.GatewayRestart = Test-OpenClawCommandSupport -Arguments @("gateway", "restart")
-    $script:Context.Capabilities.DoctorRepair = Test-OpenClawCommandSupport -Arguments @("doctor", "--repair")
-    $script:Context.Capabilities.DoctorNonInteractive = Test-OpenClawCommandSupport -Arguments @("doctor", "--non-interactive")
-    $script:Context.Capabilities.Dashboard = Test-OpenClawCommandSupport -Arguments @("dashboard")
+    param(
+        [string]$RuntimeVersion = $null,
+        [switch]$ForceRefresh
+    )
 
-    Write-Log -Level "INFO" -Message ("Capabilities: {0}" -f (($script:Context.Capabilities.GetEnumerator() | ForEach-Object { "{0}={1}" -f $_.Key, $_.Value }) -join ", "))
+    $state = Resolve-InstallState
+    $defaults = Get-DefaultCapabilities
+    $cacheVersion = Get-StateProperty -State $state -Name "capabilitiesRuntimeVersion"
+    $rawCachedCapabilities = Get-StateProperty -State $state -Name "capabilities"
+    $cachedCapabilities = Convert-CapabilityState -InputObject $rawCachedCapabilities
+
+    $cacheIsComplete = $true
+    foreach ($key in @($defaults.Keys)) {
+        $hasKey = $false
+        if ($rawCachedCapabilities -is [System.Collections.IDictionary]) {
+            $hasKey = $rawCachedCapabilities.Contains($key)
+        } elseif ($null -ne $rawCachedCapabilities -and $null -ne $rawCachedCapabilities.PSObject.Properties[$key]) {
+            $hasKey = $true
+        }
+
+        if (-not $hasKey) {
+            $cacheIsComplete = $false
+            break
+        }
+    }
+
+    if (-not $ForceRefresh -and -not [string]::IsNullOrWhiteSpace("$RuntimeVersion") -and -not [string]::IsNullOrWhiteSpace("$cacheVersion") -and [string]::Equals("$RuntimeVersion", "$cacheVersion", [System.StringComparison]::OrdinalIgnoreCase) -and $cacheIsComplete) {
+        foreach ($entry in $cachedCapabilities.GetEnumerator()) {
+            $script:Context.Capabilities[$entry.Key] = [bool]$entry.Value
+        }
+        Write-Log -Level "INFO" -Message ("Using cached capabilities for runtime {0}: {1}" -f $RuntimeVersion, (($script:Context.Capabilities.GetEnumerator() | ForEach-Object { "{0}={1}" -f $_.Key, $_.Value }) -join ", "))
+        return [pscustomobject]$script:Context.Capabilities
+    }
+
+    $probed = Get-DefaultCapabilities
+    $probed.DaemonStatusJson = Test-OpenClawCommandSupport -Arguments @("daemon", "status", "--json")
+    $probed.StatusDeep = Test-OpenClawCommandSupport -Arguments @("status", "--deep")
+    $probed.StatusAll = Test-OpenClawCommandSupport -Arguments @("status", "--all")
+    $probed.HealthJson = Test-OpenClawCommandSupport -Arguments @("health", "--json", "--timeout", "1000")
+    $probed.GatewayStatusRequireRpc = Test-OpenClawCommandSupport -Arguments @("gateway", "status", "--json", "--require-rpc")
+    $probed.GatewayStatusJson = Test-OpenClawCommandSupport -Arguments @("gateway", "status", "--json")
+    $probed.GatewayStatus = Test-OpenClawCommandSupport -Arguments @("gateway", "status")
+    $probed.GatewayInstall = Test-OpenClawCommandSupport -Arguments @("gateway", "install", "--force")
+    $probed.GatewayStart = Test-OpenClawCommandSupport -Arguments @("gateway", "start")
+    $probed.GatewayStop = Test-OpenClawCommandSupport -Arguments @("gateway", "stop")
+    $probed.GatewayRestart = Test-OpenClawCommandSupport -Arguments @("gateway", "restart")
+    $probed.DoctorRepair = Test-OpenClawCommandSupport -Arguments @("doctor", "--repair")
+    $probed.DoctorNonInteractive = Test-OpenClawCommandSupport -Arguments @("doctor", "--non-interactive")
+    $probed.DoctorGenerateGatewayToken = Test-OpenClawCommandSupport -Arguments @("doctor", "--generate-gateway-token")
+    $probed.Dashboard = Test-OpenClawCommandSupport -Arguments @("dashboard")
+    $probed.DashboardNoOpen = $probed.Dashboard
+    $probed.ModelsStatusJson = Test-OpenClawCommandSupport -Arguments @("models", "status", "--json")
+    $probed.ModelsStatusPlain = Test-OpenClawCommandSupport -Arguments @("models", "status")
+    $probed.ModelsStatusCheck = $probed.ModelsStatusPlain
+    $probed.ModelsAuthAdd = Test-OpenClawCommandSupport -Arguments @("models", "auth", "add")
+    $probed.ModelsAuthLogin = Test-OpenClawCommandSupport -Arguments @("models", "auth", "login")
+    $probed.ModelsAuthSetupToken = Test-OpenClawCommandSupport -Arguments @("models", "auth", "setup-token")
+
+    foreach ($entry in $probed.GetEnumerator()) {
+        $script:Context.Capabilities[$entry.Key] = [bool]$entry.Value
+    }
+
+    $persistUpdates = [ordered]@{
+        capabilities = [pscustomobject]$probed
+        capabilitiesRuntimeVersion = if ([string]::IsNullOrWhiteSpace("$RuntimeVersion")) { $cacheVersion } else { $RuntimeVersion }
+    }
+    Persist-InstallState -StateUpdates $persistUpdates
+
+    Write-Log -Level "INFO" -Message ("Refreshed capabilities for runtime {0}: {1}" -f $(if ([string]::IsNullOrWhiteSpace("$RuntimeVersion")) { "<unknown>" } else { $RuntimeVersion }), (($script:Context.Capabilities.GetEnumerator() | ForEach-Object { "{0}={1}" -f $_.Key, $_.Value }) -join ", "))
+    return [pscustomobject]$script:Context.Capabilities
 }
 
 function Get-NormalizedReleaseVersion {
@@ -1599,13 +1876,13 @@ function Test-GatewayServiceLoaded {
 }
 
 function Test-Healthy {
-    if ($script:Context.Capabilities.HealthJson) {
-        $result = Invoke-OpenClaw -Arguments @("health", "--json", "--timeout", "10000") -TimeoutSeconds 30
+    if ($script:Context.Capabilities.GatewayStatusRequireRpc) {
+        $result = Invoke-OpenClaw -Arguments @("gateway", "status", "--json", "--require-rpc") -TimeoutSeconds 30
         return (-not $result.TimedOut -and $result.ExitCode -eq 0)
     }
 
-    if ($script:Context.Capabilities.GatewayStatusRequireRpc) {
-        $result = Invoke-OpenClaw -Arguments @("gateway", "status", "--json", "--require-rpc") -TimeoutSeconds 30
+    if ($script:Context.Capabilities.HealthJson) {
+        $result = Invoke-OpenClaw -Arguments @("health", "--json", "--timeout", "10000") -TimeoutSeconds 30
         return (-not $result.TimedOut -and $result.ExitCode -eq 0)
     }
 
@@ -1616,16 +1893,6 @@ function Test-Healthy {
 
     if ($script:Context.Capabilities.StatusDeep) {
         $result = Invoke-OpenClaw -Arguments @("status", "--deep") -TimeoutSeconds 30
-        return (-not $result.TimedOut -and $result.ExitCode -eq 0)
-    }
-
-    if ($script:Context.Capabilities.StatusAll) {
-        $result = Invoke-OpenClaw -Arguments @("status", "--all") -TimeoutSeconds 30
-        return (-not $result.TimedOut -and $result.ExitCode -eq 0)
-    }
-
-    if ($script:Context.Capabilities.GatewayStatus) {
-        $result = Invoke-OpenClaw -Arguments @("gateway", "status") -TimeoutSeconds 30
         return (-not $result.TimedOut -and $result.ExitCode -eq 0)
     }
 
@@ -1702,16 +1969,16 @@ function Collect-StatusDiagnostics {
         [void](Invoke-OpenClaw -Arguments @("gateway", "status", "--json", "--require-rpc") -TimeoutSeconds 60)
     }
 
+    if ($script:Context.Capabilities.HealthJson) {
+        [void](Invoke-OpenClaw -Arguments @("health", "--json", "--timeout", "10000") -TimeoutSeconds 60)
+    }
+
     if ($script:Context.Capabilities.GatewayStatusJson) {
         [void](Invoke-OpenClaw -Arguments @("gateway", "status", "--json") -TimeoutSeconds 60)
-    } elseif ($script:Context.Capabilities.GatewayStatus) {
-        [void](Invoke-OpenClaw -Arguments @("gateway", "status") -TimeoutSeconds 60)
     }
 
     if ($script:Context.Capabilities.StatusDeep) {
         [void](Invoke-OpenClaw -Arguments @("status", "--deep") -TimeoutSeconds 60)
-    } elseif ($script:Context.Capabilities.StatusAll) {
-        [void](Invoke-OpenClaw -Arguments @("status", "--all") -TimeoutSeconds 60)
     }
 }
 
@@ -1872,19 +2139,7 @@ function Run-GatewayInstallForce {
 }
 
 function Open-Onboard {
-    $wrapperPath = Resolve-WrapperPath
-    if ([string]::IsNullOrWhiteSpace($wrapperPath) -or -not (Test-Path -LiteralPath $wrapperPath)) {
-        Write-Log -Level "WARN" -Message "Cannot open onboarding because the wrapper is unavailable."
-        return $false
-    }
-
-    $commandProcessor = Get-CommandProcessorPath
-
-    $commandLine = ('"{0}" onboard --install-daemon' -f $wrapperPath)
-    Write-UiStatus -Level "warn" -Message "Manual configuration is required. Opening onboarding..."
-    Write-Log -Level "INFO" -Message ("Launching onboarding: {0} /d /s /c {1}" -f $commandProcessor, $commandLine)
-    Start-Process -FilePath $commandProcessor -ArgumentList @("/d", "/s", "/c", $commandLine) -WorkingDirectory $script:Context.DataRoot | Out-Null
-    return $true
+    return (Start-DetachedOpenClawCommand -Arguments @("onboard", "--install-daemon") -StatusMessage "Manual configuration is still required. Opening onboarding..." -LogMessage "Opening onboarding via detached wrapper command.")
 }
 
 function Get-FirstHttpUrlFromText {
@@ -2049,6 +2304,633 @@ function Convert-ConfigOutputToStringList {
     }
 }
 
+function Get-ConfigTextValue {
+    param(
+        [string]$Key,
+        [int]$TimeoutSeconds = 30
+    )
+
+    try {
+        $result = Invoke-OpenClaw -Arguments @("config", "get", $Key) -TimeoutSeconds $TimeoutSeconds
+        if ($result.TimedOut) {
+            Write-Log -Level "WARN" -Message ("Timed out while reading config key: {0}" -f $Key)
+            return [pscustomobject]@{
+                Success  = $false
+                Value    = $null
+                ExitCode = 124
+                TimedOut = $true
+            }
+        }
+
+        $text = (@($result.Output) | ForEach-Object { "$_" } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join "`n"
+        $text = $text.Trim()
+        if ($text.ToLowerInvariant() -in @("undefined", "null")) {
+            $text = $null
+        }
+
+        return [pscustomobject]@{
+            Success  = $true
+            Value    = $text
+            ExitCode = $result.ExitCode
+            TimedOut = $false
+        }
+    } catch {
+        Write-Log -Level "WARN" -Message ("Failed to read config key '{0}': {1}" -f $Key, $_.Exception.Message)
+        return [pscustomobject]@{
+            Success  = $false
+            Value    = $null
+            ExitCode = 1
+            TimedOut = $false
+        }
+    }
+}
+
+function Get-GatewayTokenSource {
+    param([string]$TokenText)
+
+    if ([string]::IsNullOrWhiteSpace($TokenText)) {
+        return "missing"
+    }
+
+    $trimmed = $TokenText.Trim()
+    if ($trimmed.StartsWith("{") -or $trimmed.StartsWith("[")) {
+        return "config-secretref"
+    }
+    if ($trimmed -match '(?i)(secretref|vault|1password|op://|source)') {
+        return "config-secretref"
+    }
+
+    return "config"
+}
+
+function Ensure-GatewayTokenReady {
+    param(
+        [switch]$EmitUiStatus
+    )
+
+    $state = Convert-GatewayTokenState -InputObject $null
+    $modeResult = Get-ConfigTextValue -Key "gateway.auth.mode"
+    $mode = if ($modeResult.Success -and -not [string]::IsNullOrWhiteSpace("$($modeResult.Value)")) {
+        "$($modeResult.Value)".Trim().ToLowerInvariant()
+    } else {
+        "token"
+    }
+    $state.mode = $mode
+
+    if ($mode -eq "none") {
+        $state.status = "not-required"
+        $state.source = "config"
+        $state.message = "gateway.auth.mode is set to none."
+        return [pscustomobject]@{
+            Ready           = $true
+            RequiresAttention = $false
+            State           = [pscustomobject]$state
+        }
+    }
+
+    $envToken = [Environment]::GetEnvironmentVariable("OPENCLAW_GATEWAY_TOKEN")
+    if (-not [string]::IsNullOrWhiteSpace($envToken)) {
+        $state.status = "available"
+        $state.source = "env"
+        $state.message = "Gateway token is available from OPENCLAW_GATEWAY_TOKEN."
+        return [pscustomobject]@{
+            Ready             = $true
+            RequiresAttention = $false
+            State             = [pscustomobject]$state
+        }
+    }
+
+    $tokenResult = Get-ConfigTextValue -Key "gateway.auth.token"
+    if ($tokenResult.Success -and -not [string]::IsNullOrWhiteSpace("$($tokenResult.Value)")) {
+        $state.status = "available"
+        $state.source = Get-GatewayTokenSource -TokenText "$($tokenResult.Value)"
+        $state.message = "Gateway token is configured."
+        return [pscustomobject]@{
+            Ready             = $true
+            RequiresAttention = $false
+            State             = [pscustomobject]$state
+        }
+    }
+
+    if ($script:Context.Capabilities.DoctorGenerateGatewayToken) {
+        if ($EmitUiStatus) {
+            Write-UiStatus -Level "info" -Message "Gateway token is missing. Attempting to generate one automatically..."
+        }
+        Write-Log -Level "INFO" -Message "Gateway token is missing. Running openclaw doctor --generate-gateway-token."
+        $doctorResult = Invoke-OpenClaw -Arguments @("doctor", "--generate-gateway-token") -TimeoutSeconds 90
+        if (-not $doctorResult.TimedOut -and $doctorResult.ExitCode -eq 0) {
+            $tokenResult = Get-ConfigTextValue -Key "gateway.auth.token"
+            if ($tokenResult.Success -and -not [string]::IsNullOrWhiteSpace("$($tokenResult.Value)")) {
+                $state.status = "generated"
+                $state.source = Get-GatewayTokenSource -TokenText "$($tokenResult.Value)"
+                $state.message = "Gateway token was generated automatically."
+                return [pscustomobject]@{
+                    Ready             = $true
+                    RequiresAttention = $false
+                    State             = [pscustomobject]$state
+                }
+            }
+        }
+
+        Write-Log -Level "WARN" -Message ("Gateway token generation did not complete cleanly (timedOut={0}, exitCode={1})." -f $doctorResult.TimedOut, $doctorResult.ExitCode)
+    }
+
+    $state.status = "missing-compatible"
+    $state.source = "none"
+    $state.message = "Gateway token is still missing."
+    return [pscustomobject]@{
+        Ready             = $false
+        RequiresAttention = $true
+        State             = [pscustomobject]$state
+        Summary           = "Gateway token is still missing. The dashboard may open, but startup will not be treated as a full success."
+        NextAction        = "Set a Gateway token on the gateway host, then run Start again."
+        RecoveryCommand   = "openclaw doctor --generate-gateway-token"
+    }
+}
+
+function Resolve-LoopbackDashboardUrlFromConfig {
+    $portResult = Get-ConfigTextValue -Key "gateway.port"
+    $basePathResult = Get-ConfigTextValue -Key "gateway.controlUi.basePath"
+
+    $port = 18789
+    if ($portResult.Success) {
+        $parsedPort = 0
+        if ([int]::TryParse("$($portResult.Value)", [ref]$parsedPort) -and $parsedPort -gt 0) {
+            $port = $parsedPort
+        }
+    }
+
+    $basePath = "$($basePathResult.Value)"
+    if ([string]::IsNullOrWhiteSpace($basePath)) {
+        $basePath = "/"
+    }
+    if (-not $basePath.StartsWith("/")) {
+        $basePath = "/" + $basePath
+    }
+
+    return ("http://127.0.0.1:{0}{1}" -f $port, $basePath)
+}
+
+function Classify-DashboardFailureReason {
+    param(
+        [string]$OutputText,
+        [string]$DefaultReason = "dashboard_unavailable"
+    )
+
+    $text = "$OutputText"
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return $DefaultReason
+    }
+
+    if ($text -match '(?i)origin not allowed') {
+        return "origin_not_allowed"
+    }
+    if ($text -match '(?i)unauthorized|missing explicit credentials|token') {
+        return "gateway_token_required"
+    }
+    if ($text -match '(?i)timed out|timeout') {
+        return "dashboard_timeout"
+    }
+
+    return $DefaultReason
+}
+
+function Verify-DashboardReady {
+    param(
+        [string]$StartMode = "local-stable"
+    )
+
+    $normalizedStartMode = Get-NormalizedStartMode -Value $StartMode
+    if ($script:Context.Capabilities.DashboardNoOpen) {
+        try {
+            $result = Invoke-OpenClaw -Arguments @("dashboard", "--no-open") -TimeoutSeconds 45
+            $outputText = ($result.Output -join "`n").Trim()
+            if ($result.TimedOut) {
+                return [pscustomobject]@{
+                    Ready    = $false
+                    Reason   = "dashboard_timeout"
+                    Summary  = "Dashboard verification timed out."
+                    NextAction = "Run Repair again or inspect the gateway logs."
+                    OutputText = $outputText
+                }
+            }
+
+            if ($result.ExitCode -ne 0) {
+                $reason = Classify-DashboardFailureReason -OutputText $outputText -DefaultReason "dashboard_verify_failed"
+                return [pscustomobject]@{
+                    Ready      = $false
+                    Reason     = $reason
+                    Summary    = "Dashboard verification failed."
+                    NextAction = if ($reason -eq "origin_not_allowed") {
+                        "Dashboard origin policy drift was detected. Run Repair first."
+                    } else {
+                        "Run Repair first to realign the Dashboard and Gateway configuration."
+                    }
+                    OutputText = $outputText
+                }
+            }
+
+            $dashboardUrl = Get-FirstHttpUrlFromText -Text $outputText
+            if ([string]::IsNullOrWhiteSpace($dashboardUrl)) {
+                return [pscustomobject]@{
+                    Ready      = $false
+                    Reason     = "dashboard_url_missing"
+                    Summary    = "Dashboard verification did not return a usable URL."
+                    NextAction = "Run Repair first and confirm the Control UI address and asset path."
+                    OutputText = $outputText
+                }
+            }
+
+            $dashboardUri = Try-ParseHttpUri -Value $dashboardUrl
+            if ($null -eq $dashboardUri) {
+                return [pscustomobject]@{
+                    Ready      = $false
+                    Reason     = "dashboard_url_invalid"
+                    Summary    = "Dashboard returned an invalid URL."
+                    NextAction = "Run Repair first and confirm the dashboard URL configuration."
+                    OutputText = $outputText
+                }
+            }
+
+            if ($normalizedStartMode -eq "local-stable" -and -not (Test-LoopbackHost -OriginHost $dashboardUri.Host)) {
+                return [pscustomobject]@{
+                    Ready      = $false
+                    Reason     = "origin_not_allowed"
+                    Summary    = "The current Dashboard URL is not loopback. One-click Start will not continue through a remote/LAN path."
+                    NextAction = "Run Repair first to restore a local dashboard path. For remote access, use Tailscale Serve HTTPS or an SSH tunnel."
+                    OutputText = $outputText
+                }
+            }
+
+            return [pscustomobject]@{
+                Ready      = $true
+                Reason     = "dashboard_ready"
+                Url        = $dashboardUrl
+                Uri        = $dashboardUri
+                OutputText = $outputText
+                Mode       = "native"
+            }
+        } catch {
+            Write-Log -Level "WARN" -Message ("Failed to verify dashboard readiness via CLI: {0}" -f $_.Exception.Message)
+        }
+    }
+
+    if (-not $script:Context.Capabilities.Dashboard) {
+        $fallbackUrl = Resolve-LoopbackDashboardUrlFromConfig
+        $fallbackUri = Try-ParseHttpUri -Value $fallbackUrl
+        if ($null -ne $fallbackUri -and (($normalizedStartMode -ne "local-stable") -or (Test-LoopbackHost -OriginHost $fallbackUri.Host))) {
+            return [pscustomobject]@{
+                Ready      = $true
+                Reason     = "dashboard_fallback_ready"
+                Url        = $fallbackUrl
+                Uri        = $fallbackUri
+                OutputText = $null
+                Mode       = "url-fallback"
+            }
+        }
+    }
+
+    if ($normalizedStartMode -eq "lan-breakglass") {
+        $fallbackUrl = Resolve-LoopbackDashboardUrlFromConfig
+        return [pscustomobject]@{
+            Ready      = $true
+            Reason     = "dashboard_fallback_ready"
+            Url        = $fallbackUrl
+            Uri        = (Try-ParseHttpUri -Value $fallbackUrl)
+            OutputText = $null
+            Mode       = "url-fallback"
+        }
+    }
+
+    return [pscustomobject]@{
+        Ready      = $false
+        Reason     = "dashboard_command_missing"
+        Summary    = "The installed runtime does not support the native dashboard command."
+        NextAction = "Run Update or Repair first so the dashboard launcher matches this runtime."
+        OutputText = $null
+    }
+}
+
+function Get-FirstProviderRefFromText {
+    param([string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return $null
+    }
+
+    $match = [regex]::Match($Text, '(?<provider>[a-z0-9][a-z0-9-]*)/(?<model>[a-z0-9][^"\s]*)', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if ($match.Success) {
+        return $match.Groups["provider"].Value.Trim().ToLowerInvariant()
+    }
+
+    return $null
+}
+
+function Find-ProviderAuthNode {
+    param(
+        [object]$ProvidersNode,
+        [string]$ProviderName,
+        [int]$Depth = 0
+    )
+
+    if ($Depth -gt 5 -or $null -eq $ProvidersNode -or [string]::IsNullOrWhiteSpace($ProviderName)) {
+        return $null
+    }
+
+    $property = $ProvidersNode.PSObject.Properties[$ProviderName]
+    if ($null -ne $property) {
+        return $property.Value
+    }
+
+    if ($ProvidersNode -is [System.Collections.IEnumerable] -and -not ($ProvidersNode -is [string])) {
+        foreach ($item in @($ProvidersNode)) {
+            if ($null -eq $item) {
+                continue
+            }
+
+            $itemProvider = $null
+            foreach ($candidateName in @("provider", "name", "id")) {
+                $candidateProperty = $item.PSObject.Properties[$candidateName]
+                if ($null -ne $candidateProperty -and -not [string]::IsNullOrWhiteSpace("$($candidateProperty.Value)")) {
+                    $itemProvider = "$($candidateProperty.Value)".Trim().ToLowerInvariant()
+                    break
+                }
+            }
+
+            if ($itemProvider -eq $ProviderName.ToLowerInvariant()) {
+                return $item
+            }
+
+            $nested = Find-ProviderAuthNode -ProvidersNode $item -ProviderName $ProviderName -Depth ($Depth + 1)
+            if ($null -ne $nested) {
+                return $nested
+            }
+        }
+    }
+
+    foreach ($childProperty in $ProvidersNode.PSObject.Properties) {
+        if ($null -eq $childProperty.Value -or $childProperty.Value -is [string]) {
+            continue
+        }
+
+        $nested = Find-ProviderAuthNode -ProvidersNode $childProperty.Value -ProviderName $ProviderName -Depth ($Depth + 1)
+        if ($null -ne $nested) {
+            return $nested
+        }
+    }
+
+    return $null
+}
+
+function Resolve-ProviderNameFromModelsStatus {
+    param(
+        [object]$Parsed,
+        [string]$RawText
+    )
+
+    $raw = "$RawText"
+    foreach ($pattern in @(
+        '"defaultProvider"\s*:\s*"(?<provider>[^"]+)"',
+        '"primaryProvider"\s*:\s*"(?<provider>[^"]+)"',
+        '"provider"\s*:\s*"(?<provider>anthropic|openai-codex|openai|openrouter|ollama|github-copilot|glm|zai|bedrock)"',
+        '"primary"\s*:\s*"(?<provider>[a-z0-9][a-z0-9-]*)/[^"]+"',
+        '"defaultModel"\s*:\s*"(?<provider>[a-z0-9][a-z0-9-]*)/[^"]+"'
+    )) {
+        $match = [regex]::Match($raw, $pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        if ($match.Success) {
+            return $match.Groups["provider"].Value.Trim().ToLowerInvariant()
+        }
+    }
+
+    $provider = Get-FirstProviderRefFromText -Text $raw
+    if (-not [string]::IsNullOrWhiteSpace($provider)) {
+        return $provider
+    }
+
+    $authNode = Get-StateProperty -State $Parsed -Name "auth"
+    $providersNode = Get-StateProperty -State $authNode -Name "providers"
+    if ($null -ne $providersNode) {
+        $providerNames = @($providersNode.PSObject.Properties | ForEach-Object { $_.Name } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        if ($providerNames.Count -eq 1) {
+            return "$($providerNames[0])".Trim().ToLowerInvariant()
+        }
+    }
+
+    return $null
+}
+
+function Test-AuthTextIndicatesMissing {
+    param([string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return $false
+    }
+
+    return [regex]::IsMatch($Text, '(?i)(missing auth|missing credentials|no credentials|expired|unresolved|invalid auth|auth required|setup-token required|login required)')
+}
+
+function Test-AuthTextIndicatesReady {
+    param([string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return $false
+    }
+
+    return [regex]::IsMatch($Text, '(?i)\b(ready|configured|available|healthy|valid|connected|ok)\b')
+}
+
+function Get-ProviderRecoveryCommand {
+    param([string]$ProviderName)
+
+    switch ("$ProviderName".Trim().ToLowerInvariant()) {
+        "anthropic" {
+            if ($script:Context.Capabilities.ModelsAuthAdd) {
+                return "openclaw models auth add --provider anthropic"
+            }
+            if ($script:Context.Capabilities.ModelsAuthSetupToken) {
+                return "openclaw models auth setup-token --provider anthropic"
+            }
+            return "openclaw onboard --auth-choice setup-token"
+        }
+        "openai-codex" {
+            if ($script:Context.Capabilities.ModelsAuthLogin) {
+                return "openclaw models auth login --provider openai-codex"
+            }
+            return "openclaw onboard --auth-choice openai-codex"
+        }
+        default {
+            return "openclaw onboard"
+        }
+    }
+}
+
+function Resolve-ProviderAuthState {
+    $state = Convert-ProviderAuthState -InputObject $null
+    $providerName = $null
+    $jsonSucceeded = $false
+
+    if ($script:Context.Capabilities.ModelsStatusJson) {
+        try {
+            $result = Invoke-OpenClaw -Arguments @("models", "status", "--json") -TimeoutSeconds 60
+            if (-not $result.TimedOut -and $result.ExitCode -eq 0) {
+                $rawText = ($result.Output -join "`n").Trim()
+                $parsed = $rawText | ConvertFrom-Json -ErrorAction Stop
+                $providerName = Resolve-ProviderNameFromModelsStatus -Parsed $parsed -RawText $rawText
+                $state.provider = $providerName
+                $authNode = Get-StateProperty -State $parsed -Name "auth"
+                $providersNode = Get-StateProperty -State $authNode -Name "providers"
+                $providerNode = Find-ProviderAuthNode -ProvidersNode $providersNode -ProviderName $providerName
+                $providerText = if ($null -ne $providerNode) { $providerNode | ConvertTo-Json -Depth 10 -Compress } else { $rawText }
+
+                if (Test-AuthTextIndicatesMissing -Text $providerText) {
+                    $state.status = "missing"
+                    $state.source = "models-status-json"
+                    $state.message = "Provider auth is missing or expired."
+                    $jsonSucceeded = $true
+                } elseif (Test-AuthTextIndicatesReady -Text $providerText) {
+                    $state.status = "ready"
+                    $state.source = "models-status-json"
+                    $state.message = "Provider auth is available."
+                    $jsonSucceeded = $true
+                }
+            }
+        } catch {
+            Write-Log -Level "WARN" -Message ("Failed to classify provider auth via models status --json: {0}" -f $_.Exception.Message)
+        }
+    }
+
+    if (-not $jsonSucceeded -and $script:Context.Capabilities.ModelsStatusPlain) {
+        try {
+            $result = Invoke-OpenClaw -Arguments @("models", "status") -TimeoutSeconds 60
+            if (-not $result.TimedOut -and $result.ExitCode -eq 0) {
+                $rawText = ($result.Output -join "`n").Trim()
+                if ([string]::IsNullOrWhiteSpace($providerName)) {
+                    $providerName = Get-FirstProviderRefFromText -Text $rawText
+                }
+                $state.provider = $providerName
+                if (Test-AuthTextIndicatesMissing -Text $rawText) {
+                    $state.status = "missing"
+                    $state.source = "models-status-text"
+                    $state.message = "Provider auth is missing or expired."
+                    $jsonSucceeded = $true
+                } elseif (Test-AuthTextIndicatesReady -Text $rawText) {
+                    $state.status = "ready"
+                    $state.source = "models-status-text"
+                    $state.message = "Provider auth is available."
+                    $jsonSucceeded = $true
+                }
+            }
+        } catch {
+            Write-Log -Level "WARN" -Message ("Failed to classify provider auth via models status: {0}" -f $_.Exception.Message)
+        }
+    }
+
+    if (-not $jsonSucceeded -and $script:Context.Capabilities.ModelsStatusCheck) {
+        try {
+            $checkResult = Invoke-OpenClaw -Arguments @("models", "status", "--check") -TimeoutSeconds 45
+            switch ($checkResult.ExitCode) {
+                0 {
+                    $state.status = "ready"
+                    $state.source = "models-status-check"
+                    $state.message = "Provider auth is available."
+                    $jsonSucceeded = $true
+                }
+                2 {
+                    $state.status = "expiring"
+                    $state.source = "models-status-check"
+                    $state.message = "Provider auth is available but expiring soon."
+                    $jsonSucceeded = $true
+                }
+                1 {
+                    $state.status = "missing"
+                    $state.source = "models-status-check"
+                    $state.message = "Provider auth is missing or expired."
+                    $jsonSucceeded = $true
+                }
+            }
+        } catch {
+            Write-Log -Level "WARN" -Message ("Failed to classify provider auth via models status --check: {0}" -f $_.Exception.Message)
+        }
+    }
+
+    $providerDisplay = if ([string]::IsNullOrWhiteSpace("$providerName")) { "provider" } else { $providerName }
+    if ($state.status -eq "missing") {
+        return [pscustomobject]@{
+            Ready             = $false
+            RequiresAttention = $true
+            Provider          = $providerName
+            State             = [pscustomobject]$state
+            Summary           = ("Dashboard is open, but {0} model auth is still missing." -f $providerDisplay)
+            NextAction        = switch ("$providerName".Trim().ToLowerInvariant()) {
+                "anthropic"    { "Add an Anthropic setup-token or re-auth the profile." }
+                "openai-codex" { "Complete OpenAI Codex sign-in, then try again." }
+                default        { "Complete auth for the current provider, then try again." }
+            }
+            RecoveryCommand   = Get-ProviderRecoveryCommand -ProviderName $providerName
+        }
+    }
+
+    return [pscustomobject]@{
+        Ready             = $true
+        RequiresAttention = $false
+        Provider          = $providerName
+        State             = [pscustomobject]$state
+        Summary           = $null
+        NextAction        = $null
+        RecoveryCommand   = $null
+    }
+}
+
+function Start-DetachedOpenClawCommand {
+    param(
+        [string[]]$Arguments,
+        [string]$StatusMessage = $null,
+        [string]$LogMessage = $null
+    )
+
+    $wrapperPath = Resolve-WrapperPath
+    if ([string]::IsNullOrWhiteSpace($wrapperPath) -or -not (Test-Path -LiteralPath $wrapperPath)) {
+        Write-Log -Level "WARN" -Message "Cannot launch detached OpenClaw command because the wrapper is unavailable."
+        return $false
+    }
+
+    $commandProcessor = Get-CommandProcessorPath
+    $commandLine = ('call "{0}" {1}' -f $wrapperPath, (($Arguments | ForEach-Object { Format-CmdArgument -Value $_ }) -join ' '))
+    if (-not [string]::IsNullOrWhiteSpace($StatusMessage)) {
+        Write-UiStatus -Level "warn" -Message $StatusMessage
+    }
+    if (-not [string]::IsNullOrWhiteSpace($LogMessage)) {
+        Write-Log -Level "INFO" -Message $LogMessage
+    }
+    Start-Process -FilePath $commandProcessor -ArgumentList @("/d", "/s", "/c", $commandLine) -WorkingDirectory $script:Context.DataRoot | Out-Null
+    return $true
+}
+
+function Open-ProviderAuthRepair {
+    param([string]$ProviderName)
+
+    switch ("$ProviderName".Trim().ToLowerInvariant()) {
+        "anthropic" {
+            if ($script:Context.Capabilities.ModelsAuthAdd) {
+                return (Start-DetachedOpenClawCommand -Arguments @("models", "auth", "add", "--provider", "anthropic") -StatusMessage "Anthropic auth is missing. Opening the targeted repair flow..." -LogMessage "Opening targeted provider auth repair for anthropic via models auth add.")
+            }
+            if ($script:Context.Capabilities.ModelsAuthSetupToken) {
+                return (Start-DetachedOpenClawCommand -Arguments @("models", "auth", "setup-token", "--provider", "anthropic") -StatusMessage "Anthropic auth is missing. Opening setup-token repair..." -LogMessage "Opening targeted provider auth repair for anthropic via models auth setup-token.")
+            }
+            return (Start-DetachedOpenClawCommand -Arguments @("onboard", "--install-daemon", "--auth-choice", "setup-token") -StatusMessage "Anthropic auth is missing. Opening onboarding repair..." -LogMessage "Opening onboarding fallback for anthropic auth repair.")
+        }
+        "openai-codex" {
+            if ($script:Context.Capabilities.ModelsAuthLogin) {
+                return (Start-DetachedOpenClawCommand -Arguments @("models", "auth", "login", "--provider", "openai-codex") -StatusMessage "OpenAI Codex auth is missing. Opening the targeted repair flow..." -LogMessage "Opening targeted provider auth repair for openai-codex via models auth login.")
+            }
+            return (Start-DetachedOpenClawCommand -Arguments @("onboard", "--install-daemon", "--auth-choice", "openai-codex") -StatusMessage "OpenAI Codex auth is missing. Opening onboarding repair..." -LogMessage "Opening onboarding fallback for openai-codex auth repair.")
+        }
+        default {
+            return (Start-DetachedOpenClawCommand -Arguments @("onboard", "--install-daemon") -StatusMessage "Provider auth still needs attention. Opening onboarding repair..." -LogMessage "Opening onboarding fallback for unknown provider auth repair.")
+        }
+    }
+}
+
 function Get-ControlUiAllowedOrigins {
     try {
         $result = Invoke-OpenClaw -Arguments @("config", "get", "gateway.controlUi.allowedOrigins") -TimeoutSeconds 30
@@ -2195,7 +3077,18 @@ function Reload-GatewayAfterControlUiConfigChange {
 }
 
 function Ensure-DashboardOriginCompatibility {
-    param([string]$DashboardUrl)
+    param(
+        [string]$DashboardUrl,
+        [string]$StartMode = "lan-breakglass"
+    )
+
+    if ((Get-NormalizedStartMode -Value $StartMode) -ne "lan-breakglass") {
+        Write-Log -Level "INFO" -Message "Skipping allowedOrigins patch because startMode is not lan-breakglass."
+        return [pscustomobject]@{
+            Patched  = $false
+            Reloaded = $false
+        }
+    }
 
     $requiredOrigins = @(Get-DashboardRequiredOrigins -DashboardUrl $DashboardUrl)
     if ($requiredOrigins.Count -eq 0) {
@@ -2263,45 +3156,120 @@ function Ensure-DashboardOriginCompatibility {
 }
 
 function Resolve-DashboardUrl {
-    if ($script:Context.Capabilities.Dashboard) {
-        try {
-            $result = Invoke-OpenClaw -Arguments @("dashboard", "--no-open") -TimeoutSeconds 45
-            if (-not $result.TimedOut -and $result.ExitCode -eq 0) {
-                $outputText = ($result.Output -join "`n").Trim()
-                $parsedUrl = Get-FirstHttpUrlFromText -Text $outputText
-                if (-not [string]::IsNullOrWhiteSpace($parsedUrl)) {
-                    return $parsedUrl
-                }
-            }
-        } catch {
-            Write-Log -Level "WARN" -Message ("Failed to resolve dashboard URL via CLI: {0}" -f $_.Exception.Message)
+    param([string]$StartMode = "local-stable")
+
+    $verification = Verify-DashboardReady -StartMode $StartMode
+    if ($verification.Ready) {
+        return $verification.Url
+    }
+
+    return $null
+}
+
+function Open-DashboardEntry {
+    param(
+        [object]$Verification = $null,
+        [string]$StartMode = "local-stable"
+    )
+
+    $normalizedStartMode = Get-NormalizedStartMode -Value $StartMode
+    $readyState = $Verification
+    if ($null -eq $readyState) {
+        $readyState = Verify-DashboardReady -StartMode $normalizedStartMode
+    }
+
+    if (-not $readyState.Ready) {
+        return [pscustomobject]@{
+            Opened          = $false
+            Mode            = "none"
+            Reason          = $readyState.Reason
+            Summary         = $readyState.Summary
+            NextAction      = $readyState.NextAction
+            RecoveryCommand = $readyState.RecoveryCommand
         }
     }
 
-    return "http://127.0.0.1:18789/"
-}
-
-function Open-DashboardAfterStart {
-    try {
-        $dashboardUrl = Resolve-DashboardUrl
-        if ([string]::IsNullOrWhiteSpace($dashboardUrl)) {
-            Write-Log -Level "WARN" -Message "Dashboard URL is empty; skipped opening browser."
-            return $false
-        }
-
-        $compatibilityResult = Ensure-DashboardOriginCompatibility -DashboardUrl $dashboardUrl
+    if ($normalizedStartMode -eq "lan-breakglass" -and -not [string]::IsNullOrWhiteSpace("$($readyState.Url)")) {
+        $compatibilityResult = Ensure-DashboardOriginCompatibility -DashboardUrl "$($readyState.Url)" -StartMode $normalizedStartMode
         if ($compatibilityResult.Patched) {
             Write-Log -Level "INFO" -Message ("Dashboard origin compatibility patch applied (reloaded={0})." -f $compatibilityResult.Reloaded)
         }
-
-        Write-UiStatus -Level "info" -Message ("Opening dashboard: {0}" -f $dashboardUrl)
-        Write-Log -Level "INFO" -Message ("Opening dashboard in browser: {0}" -f $dashboardUrl)
-        Start-Process -FilePath $dashboardUrl | Out-Null
-        return $true
-    } catch {
-        Write-Log -Level "WARN" -Message ("Failed to open dashboard automatically: {0}" -f $_.Exception.Message)
-        return $false
     }
+
+    if ($script:Context.Capabilities.Dashboard) {
+        try {
+            Write-UiStatus -Level "info" -Message "Opening the dashboard through the native launcher..."
+            $result = Invoke-OpenClaw -Arguments @("dashboard") -TimeoutSeconds 45
+            if (-not $result.TimedOut -and $result.ExitCode -eq 0) {
+                return [pscustomobject]@{
+                    Opened          = $true
+                    Mode            = "native"
+                    Reason          = "dashboard_opened"
+                    Summary         = $null
+                    NextAction      = $null
+                    RecoveryCommand = $null
+                }
+            }
+
+            $outputText = ($result.Output -join "`n").Trim()
+            $reason = Classify-DashboardFailureReason -OutputText $outputText -DefaultReason "dashboard_open_failed"
+            return [pscustomobject]@{
+                Opened          = $false
+                Mode            = "none"
+                Reason          = $reason
+                Summary         = "The native dashboard launch did not complete cleanly."
+                NextAction      = if ($reason -eq "origin_not_allowed") {
+                    "Dashboard origin policy drift was detected. Run Repair first."
+                } else {
+                    "Run Repair first, then try Start again."
+                }
+                RecoveryCommand = "openclaw dashboard"
+            }
+        } catch {
+            Write-Log -Level "WARN" -Message ("Failed to open dashboard natively: {0}" -f $_.Exception.Message)
+            return [pscustomobject]@{
+                Opened          = $false
+                Mode            = "none"
+                Reason          = "dashboard_open_failed"
+                Summary         = "The native dashboard launch threw an exception."
+                NextAction      = "Run Repair first, then try Start again."
+                RecoveryCommand = "openclaw dashboard"
+            }
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace("$($readyState.Url)")) {
+        try {
+            Write-UiStatus -Level "warn" -Message "The native dashboard command is unavailable. Falling back to the parsed URL..."
+            Start-Process -FilePath "$($readyState.Url)" | Out-Null
+            return [pscustomobject]@{
+                Opened          = $true
+                Mode            = "url-fallback"
+                Reason          = "dashboard_opened_fallback"
+                Summary         = $null
+                NextAction      = $null
+                RecoveryCommand = $null
+            }
+        } catch {
+            Write-Log -Level "WARN" -Message ("Failed to open dashboard fallback URL: {0}" -f $_.Exception.Message)
+        }
+    }
+
+    return [pscustomobject]@{
+        Opened          = $false
+        Mode            = "none"
+        Reason          = "dashboard_command_missing"
+        Summary         = "No usable dashboard launch path is available for this runtime."
+        NextAction      = "Run Update or Repair first."
+        RecoveryCommand = $null
+    }
+}
+
+function Open-DashboardAfterStart {
+    param([string]$StartMode = "local-stable")
+
+    $result = Open-DashboardEntry -StartMode $StartMode
+    return $result.Opened
 }
 
 function Ensure-OfficialGatewayPersistence {
@@ -2453,6 +3421,104 @@ function Ensure-PersistentGatewayReady {
         Ready               = $false
         UsedConsoleFallback = $false
     }
+}
+
+function Finalize-OperationalReadiness {
+    param(
+        [string]$InstalledVersion,
+        [int]$SuccessCode = $script:ExitCodes.Success,
+        [string]$SuccessMessage = $null,
+        [string]$SuccessReason = "gateway_ready",
+        [string]$SuccessSummary = $null,
+        [string]$StartMode = "local-stable",
+        [switch]$OpenDashboard,
+        [switch]$ForceCapabilityRefresh,
+        [object]$GatewayTokenPreflight = $null
+    )
+
+    $normalizedStartMode = Get-NormalizedStartMode -Value $StartMode
+    Resolve-Capabilities -RuntimeVersion $InstalledVersion -ForceRefresh:$ForceCapabilityRefresh | Out-Null
+
+    $gatewayTokenState = $GatewayTokenPreflight
+    if ($null -eq $gatewayTokenState) {
+        $gatewayTokenState = Ensure-GatewayTokenReady -EmitUiStatus
+    }
+
+    if (-not (Test-Healthy)) {
+        return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired -Message "Gateway RPC health verification failed." -Reason "gateway_rpc_unhealthy" -Summary "The Gateway was started, but the RPC health check still failed." -NextAction "Run Repair first. Reinstall only if Repair still fails." -RecoveryCommand "openclaw gateway status --json --require-rpc" -InstalledVersion $InstalledVersion -StateUpdates ([ordered]@{
+            gatewayTokenState = $gatewayTokenState.State
+            providerAuthState = [pscustomobject](Convert-ProviderAuthState -InputObject $null)
+            lastStartReason   = "gateway_rpc_unhealthy"
+            lastDashboardMode = "none"
+            startMode         = $normalizedStartMode
+        }))
+    }
+
+    $dashboardVerification = Verify-DashboardReady -StartMode $normalizedStartMode
+    if (-not $dashboardVerification.Ready) {
+        return (Complete-Maintenance -Code $script:ExitCodes.NeedsAttention -Message "Dashboard is not ready to open." -Reason $dashboardVerification.Reason -Summary $dashboardVerification.Summary -NextAction $dashboardVerification.NextAction -RecoveryCommand "openclaw dashboard --no-open" -InstalledVersion $InstalledVersion -StateUpdates ([ordered]@{
+            gatewayTokenState = $gatewayTokenState.State
+            providerAuthState = [pscustomobject](Convert-ProviderAuthState -InputObject $null)
+            lastStartReason   = $dashboardVerification.Reason
+            lastDashboardMode = "verify-failed"
+            startMode         = $normalizedStartMode
+        }))
+    }
+
+    $dashboardMode = if ([string]::IsNullOrWhiteSpace("$($dashboardVerification.Mode)")) { "verified" } else { "verified-" + $dashboardVerification.Mode }
+    if ($OpenDashboard) {
+        $dashboardOpenResult = Open-DashboardEntry -Verification $dashboardVerification -StartMode $normalizedStartMode
+        if (-not $dashboardOpenResult.Opened) {
+            return (Complete-Maintenance -Code $script:ExitCodes.NeedsAttention -Message "Dashboard failed to open." -Reason $dashboardOpenResult.Reason -Summary $dashboardOpenResult.Summary -NextAction $dashboardOpenResult.NextAction -RecoveryCommand $dashboardOpenResult.RecoveryCommand -InstalledVersion $InstalledVersion -StateUpdates ([ordered]@{
+                gatewayTokenState = $gatewayTokenState.State
+                providerAuthState = [pscustomobject](Convert-ProviderAuthState -InputObject $null)
+                lastStartReason   = $dashboardOpenResult.Reason
+                lastDashboardMode = "open-failed"
+                startMode         = $normalizedStartMode
+            }))
+        }
+
+        $dashboardMode = $dashboardOpenResult.Mode
+    }
+
+    $providerAuth = Resolve-ProviderAuthState
+    if ($providerAuth.RequiresAttention) {
+        [void](Open-ProviderAuthRepair -ProviderName $providerAuth.Provider)
+        return (Complete-Maintenance -Code $script:ExitCodes.NeedsAttention -Message "Dashboard opened, but provider auth still needs attention." -Reason "provider_auth_missing" -Summary $providerAuth.Summary -NextAction $providerAuth.NextAction -RecoveryCommand $providerAuth.RecoveryCommand -InstalledVersion $InstalledVersion -StateUpdates ([ordered]@{
+            gatewayTokenState = $gatewayTokenState.State
+            providerAuthState = $providerAuth.State
+            lastStartReason   = "provider_auth_missing"
+            lastDashboardMode = $dashboardMode
+            startMode         = $normalizedStartMode
+        }))
+    }
+
+    if ($gatewayTokenState.RequiresAttention) {
+        return (Complete-Maintenance -Code $script:ExitCodes.NeedsAttention -Message "Gateway is up and the dashboard path is restored, but the Gateway token still needs attention." -Reason "gateway_token_missing" -Summary $gatewayTokenState.Summary -NextAction $gatewayTokenState.NextAction -RecoveryCommand $gatewayTokenState.RecoveryCommand -InstalledVersion $InstalledVersion -StateUpdates ([ordered]@{
+            gatewayTokenState = $gatewayTokenState.State
+            providerAuthState = $providerAuth.State
+            lastStartReason   = "gateway_token_missing"
+            lastDashboardMode = $dashboardMode
+            startMode         = $normalizedStartMode
+        }))
+    }
+
+    $message = $SuccessMessage
+    if ([string]::IsNullOrWhiteSpace($message)) {
+        $message = Get-DefaultResultMessage -Code $SuccessCode
+    }
+    $summary = $SuccessSummary
+    if ([string]::IsNullOrWhiteSpace($summary)) {
+        $summary = $message
+    }
+
+    return (Complete-Maintenance -Code $SuccessCode -Message $message -Reason $SuccessReason -Summary $summary -InstalledVersion $InstalledVersion -MarkHealthy -HealthState "healthy" -StateUpdates ([ordered]@{
+        gatewayTokenState = $gatewayTokenState.State
+        providerAuthState = $providerAuth.State
+        lastStartReason   = $SuccessReason
+        lastDashboardMode = $dashboardMode
+        startMode         = $normalizedStartMode
+    }))
 }
 
 function Get-InstallerBaseUrl {
@@ -2702,12 +3768,15 @@ function Invoke-InstallerUpdate {
 }
 
 function Invoke-StartMode {
+    $installState = Resolve-InstallState
+    $startMode = Get-NormalizedStartMode -Value (Get-StateProperty -State $installState -Name "startMode" -Default "local-stable")
+
     if (Test-LicenseGateEnabled) {
         Write-UiPhase -Key "start.license" -Title "Checking the license" -Progress 5 -Message "Checking the local authorization state..."
         $licenseResult = Test-LicenseAccess -ModeName "start"
         if (-not $licenseResult.Allowed) {
             Write-Log -Level "ERROR" -Message ("License gate denied start mode (exitCode={0})." -f $licenseResult.ExitCode)
-            return (Complete-Maintenance -Code $script:ExitCodes.NeedsAttention -Message "A valid OpenClaw authorization code is required before starting.")
+            return (Complete-Maintenance -Code $script:ExitCodes.NeedsAttention -Message "A valid OpenClaw authorization code is required before starting." -Reason "license_required" -Summary "A valid OpenClaw authorization code is required before starting." -NextAction "Activate the local authorization first, then run Start again.")
         }
     } else {
         Write-UiPhase -Key "start.prepare" -Title "Preparing startup" -Progress 5 -Message "Preparing the startup checks..."
@@ -2717,77 +3786,92 @@ function Invoke-StartMode {
     $wrapperPath = Resolve-WrapperPath
     if ([string]::IsNullOrWhiteSpace($wrapperPath)) {
         Write-Log -Level "ERROR" -Message "OpenClaw wrapper was not found."
-        return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired)
+        return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired -Reason "wrapper_missing" -Summary "OpenClaw wrapper is missing." -NextAction "Run Update or reinstall OpenClaw first." -StateUpdates ([ordered]@{
+            lastStartReason   = "wrapper_missing"
+            lastDashboardMode = "none"
+            startMode         = $startMode
+        }))
     }
 
     $installedVersion = Get-InstalledVersion
     if ($null -eq $installedVersion -or [string]::IsNullOrWhiteSpace("$($installedVersion.NormalizedVersion)")) {
         $rawVersion = if ($null -eq $installedVersion) { "<empty>" } else { $installedVersion.RawVersion }
         Write-Log -Level "ERROR" -Message ("OpenClaw entrypoint looks broken. Raw version output: {0}" -f $rawVersion)
-        return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired)
+        return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired -Reason "entrypoint_invalid" -Summary "The OpenClaw entrypoint or version output is invalid." -NextAction "Run Update or reinstall OpenClaw first." -InstalledVersion $null -StateUpdates ([ordered]@{
+            lastStartReason   = "entrypoint_invalid"
+            lastDashboardMode = "none"
+            startMode         = $startMode
+        }))
     }
 
-    Write-UiPhase -Key "start.gateway" -Title "Checking Gateway status" -Progress 25 -Message "Checking the current Gateway status..."
-    Resolve-Capabilities
+    Resolve-Capabilities -RuntimeVersion $installedVersion.NormalizedVersion | Out-Null
+    Write-UiPhase -Key "start.gateway-token" -Title "Checking Gateway token" -Progress 18 -Message "Checking local Gateway token readiness..."
+    $gatewayTokenPreflight = Ensure-GatewayTokenReady -EmitUiStatus
+
+    Write-UiPhase -Key "start.gateway" -Title "Checking Gateway status" -Progress 30 -Message "Checking the current Gateway status..."
     $startupSnapshot = Get-GatewayReadinessSnapshot -EmitUiStatus
-    if ($startupSnapshot.Healthy) {
-        Write-Log -Level "INFO" -Message "Gateway is already healthy. Skipping restart flow and opening dashboard directly."
+    $readyResult = [pscustomobject]@{
+        Ready               = $startupSnapshot.PersistentSatisfied
+        UsedConsoleFallback = $false
+    }
+
+    if (-not $startupSnapshot.PersistentSatisfied) {
+        Collect-StatusDiagnostics
+        Write-UiPhase -Key "start.restart" -Title "Starting or restarting the Gateway" -Progress 65 -Message "Trying to start or restart the Gateway..."
+        $readyResult = Ensure-PersistentGatewayReady -AllowConsoleFallback
+        if (-not $readyResult.Ready) {
+            return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired -Message "Gateway could not be stabilized." -Reason "gateway_persistence_failed" -Summary "The wrapper tried to repair and start the Gateway, but it still did not satisfy persistence and health requirements." -NextAction "Run Repair first. If it still fails, run Update or reinstall." -RecoveryCommand "openclaw gateway status --json --require-rpc" -InstalledVersion $installedVersion.NormalizedVersion -StateUpdates ([ordered]@{
+                gatewayTokenState = $gatewayTokenPreflight.State
+                providerAuthState = [pscustomobject](Convert-ProviderAuthState -InputObject $null)
+                lastStartReason   = "gateway_persistence_failed"
+                lastDashboardMode = "none"
+                startMode         = $startMode
+            }))
+        }
+
         $refreshedInstalledVersion = Get-InstalledVersion
         if ($null -ne $refreshedInstalledVersion -and -not [string]::IsNullOrWhiteSpace("$($refreshedInstalledVersion.NormalizedVersion)")) {
             $installedVersion = $refreshedInstalledVersion
         }
-        Write-UiPhase -Key "start.dashboard" -Title "Opening dashboard" -Progress 90 -Message "Gateway is already running. Opening the dashboard..."
-        Persist-InstallState -InstalledVersion $installedVersion.NormalizedVersion -MarkHealthy
-        [void](Open-DashboardAfterStart)
-        Write-UiPhase -Key "start.verify" -Title "Verifying chat readiness" -Progress 100 -Message "Start finished. Confirming chat readiness..."
-        return (Complete-Maintenance -Code $script:ExitCodes.Success -Message "Gateway is already running. Dashboard opened.")
     }
 
-    Collect-StatusDiagnostics
-    Write-UiPhase -Key "start.restart" -Title "Starting or restarting the Gateway" -Progress 70 -Message "Trying to start or restart the Gateway..."
-    $readyResult = Ensure-PersistentGatewayReady -AllowConsoleFallback
-    if ($readyResult.Ready) {
-        $refreshedInstalledVersion = Get-InstalledVersion
-        if ($null -ne $refreshedInstalledVersion -and -not [string]::IsNullOrWhiteSpace("$($refreshedInstalledVersion.NormalizedVersion)")) {
-            $installedVersion = $refreshedInstalledVersion
-        }
-        Write-UiPhase -Key "start.verify" -Title "Verifying chat readiness" -Progress 100 -Message "Start finished. Confirming chat readiness..."
-        Persist-InstallState -InstalledVersion $installedVersion.NormalizedVersion -MarkHealthy
-        [void](Open-DashboardAfterStart)
-        if ($readyResult.UsedConsoleFallback) {
-            return (Complete-Maintenance -Code $script:ExitCodes.Success -Message "A persistent OpenClaw console window was opened. Keep it open to keep chatting.")
-        }
+    Write-UiPhase -Key "start.rpc" -Title "Verifying Gateway RPC health" -Progress 78 -Message "Verifying Gateway RPC health..."
+    Write-UiPhase -Key "start.dashboard-verify" -Title "Verifying dashboard" -Progress 88 -Message "Verifying Dashboard readiness..."
+    Write-UiPhase -Key "start.dashboard" -Title "Opening dashboard" -Progress 94 -Message "Opening the dashboard..."
+    Write-UiPhase -Key "start.provider" -Title "Checking provider auth" -Progress 98 -Message "Checking provider auth readiness..."
 
-        return (Complete-Maintenance -Code $script:ExitCodes.Success)
+    $successMessage = if ($readyResult.UsedConsoleFallback) {
+        "A persistent OpenClaw console window was opened to keep the Gateway online."
+    } elseif ($startupSnapshot.PersistentSatisfied) {
+        "Gateway is already available on this host. Continuing to open the dashboard."
+    } else {
+        "Gateway was restored to a usable state. Continuing to open the dashboard."
     }
 
-    if (Open-Onboard) {
-        return (Complete-Maintenance -Code $script:ExitCodes.NeedsAttention)
-    }
-
-    return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired)
+    return (Finalize-OperationalReadiness -InstalledVersion $installedVersion.NormalizedVersion -StartMode $startMode -OpenDashboard -GatewayTokenPreflight $gatewayTokenPreflight -SuccessCode $script:ExitCodes.Success -SuccessMessage $successMessage -SuccessReason $(if ($readyResult.UsedConsoleFallback) { "gateway_console_fallback" } else { "local_stable_ready" }) -SuccessSummary "One-click Start finished verifying the local Gateway, dashboard, and provider auth state.")
 }
 
 function Invoke-UpdateMode {
+    $installState = Resolve-InstallState
+    $startMode = Get-NormalizedStartMode -Value (Get-StateProperty -State $installState -Name "startMode" -Default "local-stable")
+
     if (Test-LicenseGateEnabled) {
         Write-UiPhase -Key "update.license" -Title "Checking the license" -Progress 3 -Message "Checking the local authorization state..."
         $licenseResult = Test-LicenseAccess -ModeName "update"
         if (-not $licenseResult.Allowed) {
             Write-Log -Level "ERROR" -Message ("License gate denied update mode (exitCode={0})." -f $licenseResult.ExitCode)
-            return (Complete-Maintenance -Code $script:ExitCodes.NeedsAttention -Message "A valid OpenClaw authorization code is required before updating.")
+            return (Complete-Maintenance -Code $script:ExitCodes.NeedsAttention -Message "A valid OpenClaw authorization code is required before updating." -Reason "license_required" -Summary "A valid OpenClaw authorization code is required before updating." -NextAction "Activate the local authorization first, then run Update again.")
         }
     } else {
         Write-UiPhase -Key "update.prepare" -Title "Preparing update" -Progress 3 -Message "Preparing the update checks..."
     }
 
     Write-UiPhase -Key "update.read-state" -Title "Reading installation state" -Progress 5 -Message "Reading the current installation state..."
-    Resolve-InstallState | Out-Null
-
     $currentVersion = $null
     if (Resolve-WrapperPath) {
         $currentVersion = Get-InstalledVersion
         if ($null -ne $currentVersion -and -not [string]::IsNullOrWhiteSpace("$($currentVersion.NormalizedVersion)")) {
-            Resolve-Capabilities
+            Resolve-Capabilities -RuntimeVersion $currentVersion.NormalizedVersion | Out-Null
         }
     }
 
@@ -2795,7 +3879,7 @@ function Invoke-UpdateMode {
     $targetRelease = Resolve-TargetRelease
     if ($null -eq $targetRelease -or [string]::IsNullOrWhiteSpace("$($targetRelease.Version)")) {
         Write-Log -Level "ERROR" -Message "Could not resolve the target release for update."
-        return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired)
+        return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired -Reason "target_release_unresolved" -Summary "Could not resolve the target release for update." -NextAction "Check network connectivity and try Update again.")
     }
 
     Write-Log -Level "INFO" -Message ("Current version: {0}" -f $(if ($null -eq $currentVersion -or [string]::IsNullOrWhiteSpace("$($currentVersion.RawVersion)")) { "<unknown>" } else { $currentVersion.RawVersion }))
@@ -2808,19 +3892,14 @@ function Invoke-UpdateMode {
         Write-UiPhase -Key "update.verify" -Title "Verifying update result" -Progress 100 -Message "The current installation is already up to date."
         $readyResult = Ensure-PersistentGatewayReady -AllowConsoleFallback
         if ($readyResult.Ready) {
-            Persist-InstallState -InstalledVersion $currentVersion.NormalizedVersion -MarkHealthy
-            if ($readyResult.UsedConsoleFallback) {
-                return (Complete-Maintenance -Code $script:ExitCodes.NoChanges -Message "OpenClaw is already up to date, and a persistent console window was opened.")
-            }
-
-            return (Complete-Maintenance -Code $script:ExitCodes.NoChanges -Message "OpenClaw is already up to date, and chat readiness was confirmed.")
+            return (Finalize-OperationalReadiness -InstalledVersion $currentVersion.NormalizedVersion -StartMode $startMode -SuccessCode $script:ExitCodes.NoChanges -SuccessMessage $(if ($readyResult.UsedConsoleFallback) { "OpenClaw is already up to date, and a persistent console window was opened." } else { "OpenClaw is already up to date, and post-update health verification passed." }) -SuccessReason "update_no_changes_verified" -SuccessSummary "Update verified that the current version is already latest and that the Gateway and dashboard post-checks passed.")
         }
 
-        if (Open-Onboard) {
-            return (Complete-Maintenance -Code $script:ExitCodes.NeedsAttention)
-        }
-
-        return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired)
+        return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired -Message "The current version is already latest, but the Gateway post-check failed." -Reason "update_no_changes_unhealthy" -Summary "No new version was needed, but the current installation still is not stable." -NextAction "Run Repair first." -RecoveryCommand "openclaw gateway status --json --require-rpc" -InstalledVersion $currentVersion.NormalizedVersion -StateUpdates ([ordered]@{
+            lastStartReason   = "update_no_changes_unhealthy"
+            lastDashboardMode = "none"
+            startMode         = $startMode
+        }))
     }
 
     if ($script:Context.Capabilities.GatewayStop) {
@@ -2830,72 +3909,76 @@ function Invoke-UpdateMode {
 
     Write-UiPhase -Key "update.install" -Title "Installing the update" -Progress 75 -Message "Installing the update. Please wait..."
     if (-not (Invoke-InstallerUpdate)) {
-        return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired)
+        return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired -Reason "update_install_failed" -Summary "The update installer did not complete cleanly." -NextAction "Run Update again, or use Repair if the runtime is partially updated.")
     }
 
     if (-not (Resolve-WrapperPath)) {
         Write-Log -Level "ERROR" -Message "OpenClaw wrapper is still missing after update."
-        return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired)
+        return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired -Reason "wrapper_missing_after_update" -Summary "OpenClaw wrapper is still missing after update." -NextAction "Run Repair first. Reinstall only if Repair still fails.")
     }
 
-    Resolve-Capabilities
     $installedVersion = Get-InstalledVersion
     if ($null -eq $installedVersion -or [string]::IsNullOrWhiteSpace("$($installedVersion.NormalizedVersion)")) {
         $rawVersion = if ($null -eq $installedVersion) { "<empty>" } else { $installedVersion.RawVersion }
         Write-Log -Level "ERROR" -Message ("Version verification failed after update. Raw version output: {0}" -f $rawVersion)
-        return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired)
+        return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired -Reason "version_invalid_after_update" -Summary "Version verification failed after update." -NextAction "Run Repair first. Reinstall only if Repair still fails.")
     }
+    Resolve-Capabilities -RuntimeVersion $installedVersion.NormalizedVersion -ForceRefresh | Out-Null
 
     Write-UiPhase -Key "update.restart" -Title "Restarting the Gateway" -Progress 90 -Message "Restarting the Gateway service..."
     $readyResult = Ensure-PersistentGatewayReady -AllowConsoleFallback
     if (-not $readyResult.Ready) {
         Write-Log -Level "ERROR" -Message "Gateway persistence and health verification failed after update."
-        if (Open-Onboard) {
-            return (Complete-Maintenance -Code $script:ExitCodes.NeedsAttention)
-        }
-
-        return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired)
+        return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired -Message "The update finished, but the Gateway did not return to a stable state." -Reason "update_post_restart_unhealthy" -Summary "The update completed, but Gateway persistence/RPC post-checks failed." -NextAction "Run Repair first. Reinstall only if Repair still fails." -RecoveryCommand "openclaw gateway status --json --require-rpc" -InstalledVersion $installedVersion.NormalizedVersion -StateUpdates ([ordered]@{
+            lastStartReason   = "update_post_restart_unhealthy"
+            lastDashboardMode = "none"
+            startMode         = $startMode
+        }))
     }
 
     Write-UiPhase -Key "update.verify" -Title "Verifying update result" -Progress 100 -Message "Update finished. Confirming chat readiness..."
-    Persist-InstallState -InstalledVersion $installedVersion.NormalizedVersion -MarkHealthy
-    if ($readyResult.UsedConsoleFallback) {
-        return (Complete-Maintenance -Code $script:ExitCodes.Success -Message "The update finished, and a persistent OpenClaw console window was opened.")
-    }
-
-    return (Complete-Maintenance -Code $script:ExitCodes.Success)
+    return (Finalize-OperationalReadiness -InstalledVersion $installedVersion.NormalizedVersion -StartMode $startMode -ForceCapabilityRefresh -SuccessCode $script:ExitCodes.Success -SuccessMessage $(if ($readyResult.UsedConsoleFallback) { "The update finished, and a persistent OpenClaw console window was opened." } else { "The update finished, and the Gateway/dashboard post-checks passed." }) -SuccessReason "update_completed" -SuccessSummary "The update flow completed and reused the unified post-validation pipeline.")
 }
 
 function Invoke-RepairMode {
+    $installState = Resolve-InstallState
+    $startMode = Get-NormalizedStartMode -Value (Get-StateProperty -State $installState -Name "startMode" -Default "local-stable")
+
     if (Test-LicenseGateEnabled) {
         Write-UiPhase -Key "repair.license" -Title "Checking the license" -Progress 5 -Message "Checking the local authorization state..."
         $licenseResult = Test-LicenseAccess -ModeName "repair"
         if (-not $licenseResult.Allowed) {
             Write-Log -Level "ERROR" -Message ("License gate denied repair mode (exitCode={0})." -f $licenseResult.ExitCode)
-            return (Complete-Maintenance -Code $script:ExitCodes.NeedsAttention -Message "A valid OpenClaw authorization code is required before repairing.")
+            return (Complete-Maintenance -Code $script:ExitCodes.NeedsAttention -Message "A valid OpenClaw authorization code is required before repairing." -Reason "license_required" -Summary "A valid OpenClaw authorization code is required before repairing." -NextAction "Activate the local authorization first, then run Repair again.")
         }
     } else {
         Write-UiPhase -Key "repair.prepare" -Title "Preparing repair" -Progress 5 -Message "Preparing the repair checks..."
     }
 
     Write-UiPhase -Key "repair.entry" -Title "Checking the entrypoint and version" -Progress 10 -Message "Checking the OpenClaw wrapper and version..."
-    Resolve-InstallState | Out-Null
-
     $wrapperPath = Resolve-WrapperPath
     if ([string]::IsNullOrWhiteSpace($wrapperPath)) {
         Write-Log -Level "ERROR" -Message "OpenClaw wrapper was not found and could not be rebuilt."
-        return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired)
+        return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired -Reason "repair_wrapper_missing" -Summary "OpenClaw wrapper is missing before repair." -NextAction "Run Update or reinstall OpenClaw first." -StateUpdates ([ordered]@{
+            lastStartReason   = "repair_wrapper_missing"
+            lastDashboardMode = "none"
+            startMode         = $startMode
+        }))
     }
 
     $installedVersion = Get-InstalledVersion
     if ($null -eq $installedVersion -or [string]::IsNullOrWhiteSpace("$($installedVersion.NormalizedVersion)")) {
         $rawVersion = if ($null -eq $installedVersion) { "<empty>" } else { $installedVersion.RawVersion }
         Write-Log -Level "ERROR" -Message ("Version check failed; the entrypoint still looks broken. Raw version output: {0}" -f $rawVersion)
-        return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired)
+        return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired -Reason "repair_entrypoint_invalid" -Summary "The current runtime entrypoint is still invalid before repair." -NextAction "Run Update first. Reinstall only if Update still fails." -InstalledVersion $null -StateUpdates ([ordered]@{
+            lastStartReason   = "repair_entrypoint_invalid"
+            lastDashboardMode = "none"
+            startMode         = $startMode
+        }))
     }
 
     Write-UiPhase -Key "repair.collect" -Title "Collecting runtime status" -Progress 20 -Message "Collecting the current runtime status..."
-    Resolve-Capabilities
+    Resolve-Capabilities -RuntimeVersion $installedVersion.NormalizedVersion | Out-Null
     [void](Get-DaemonStatus -EmitUiStatus)
     Collect-StatusDiagnostics
 
@@ -2903,12 +3986,7 @@ function Invoke-RepairMode {
     $readyResult = Ensure-PersistentGatewayReady -AllowConsoleFallback
     if ($readyResult.Ready) {
         Write-UiPhase -Key "repair.verify" -Title "Verifying repair result" -Progress 100 -Message "Restart finished. Confirming Gateway health..."
-        Persist-InstallState -InstalledVersion $installedVersion.NormalizedVersion -MarkHealthy
-        if ($readyResult.UsedConsoleFallback) {
-            return (Complete-Maintenance -Code $script:ExitCodes.Success -Message "Repair finished, and a persistent OpenClaw console window was opened.")
-        }
-
-        return (Complete-Maintenance -Code $script:ExitCodes.Success)
+        return (Finalize-OperationalReadiness -InstalledVersion $installedVersion.NormalizedVersion -StartMode $startMode -SuccessCode $script:ExitCodes.Success -SuccessMessage $(if ($readyResult.UsedConsoleFallback) { "Repair finished, and a persistent OpenClaw console window was opened." } else { "Repair finished, and the Gateway/dashboard post-checks passed." }) -SuccessReason "repair_restart_completed" -SuccessSummary "The repair flow passed the unified post-validation after restart.")
     }
 
     Write-UiPhase -Key "repair.doctor" -Title "Running doctor checks" -Progress 60 -Message "Running doctor checks..."
@@ -2921,12 +3999,7 @@ function Invoke-RepairMode {
             $installedVersion = $refreshedInstalledVersion
         }
         Write-UiPhase -Key "repair.verify" -Title "Verifying repair result" -Progress 100 -Message "Doctor checks finished. Confirming the repair result..."
-        Persist-InstallState -InstalledVersion $installedVersion.NormalizedVersion -MarkHealthy
-        if ($readyResult.UsedConsoleFallback) {
-            return (Complete-Maintenance -Code $script:ExitCodes.Success -Message "Repair finished, and a persistent OpenClaw console window was opened.")
-        }
-
-        return (Complete-Maintenance -Code $script:ExitCodes.Success)
+        return (Finalize-OperationalReadiness -InstalledVersion $installedVersion.NormalizedVersion -StartMode $startMode -SuccessCode $script:ExitCodes.Success -SuccessMessage $(if ($readyResult.UsedConsoleFallback) { "Doctor repair finished, and a persistent OpenClaw console window was opened." } else { "Doctor repair finished, and the Gateway/dashboard post-checks passed." }) -SuccessReason "repair_doctor_completed" -SuccessSummary "The unified post-validation passed after Doctor repair.")
     }
 
     Write-UiPhase -Key "repair.gateway-install" -Title "Reinstalling the Gateway service" -Progress 80 -Message "Reinstalling the Gateway service..."
@@ -2939,19 +4012,14 @@ function Invoke-RepairMode {
             $installedVersion = $refreshedInstalledVersion
         }
         Write-UiPhase -Key "repair.verify" -Title "Verifying repair result" -Progress 100 -Message "Gateway service rewrite finished. Confirming the repair result..."
-        Persist-InstallState -InstalledVersion $installedVersion.NormalizedVersion -MarkHealthy
-        if ($readyResult.UsedConsoleFallback) {
-            return (Complete-Maintenance -Code $script:ExitCodes.Success -Message "Repair finished, and a persistent OpenClaw console window was opened.")
-        }
-
-        return (Complete-Maintenance -Code $script:ExitCodes.Success)
+        return (Finalize-OperationalReadiness -InstalledVersion $installedVersion.NormalizedVersion -StartMode $startMode -SuccessCode $script:ExitCodes.Success -SuccessMessage $(if ($readyResult.UsedConsoleFallback) { "Gateway service rewrite finished, and a persistent OpenClaw console window was opened." } else { "Gateway service rewrite finished, and the Gateway/dashboard post-checks passed." }) -SuccessReason "repair_gateway_rewrite_completed" -SuccessSummary "The unified post-validation passed after the Gateway service rewrite.")
     }
 
-    if (Open-Onboard) {
-        return (Complete-Maintenance -Code $script:ExitCodes.NeedsAttention)
-    }
-
-    return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired)
+    return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired -Message "Repair exhausted its fallback steps, but the installation is still unstable." -Reason "repair_exhausted" -Summary "Restart, Doctor, and service rewrite still did not restore a stable state." -NextAction "Run Update first. Reinstall only if Update still fails." -RecoveryCommand "openclaw gateway status --json --require-rpc" -InstalledVersion $installedVersion.NormalizedVersion -StateUpdates ([ordered]@{
+        lastStartReason   = "repair_exhausted"
+        lastDashboardMode = "none"
+        startMode         = $startMode
+    }))
 }
 
 try {
@@ -2975,7 +4043,7 @@ try {
     exit $exitCode
 } catch {
     Write-Log -Level "ERROR" -Message ("Fatal maintenance error: {0}" -f $_.Exception)
-    [void](Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired)
+    [void](Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired -Reason "fatal_exception" -Summary "The maintenance script hit a fatal exception." -NextAction "Check the log, then run Repair or reinstall if the failure is repeatable.")
     exit $script:ExitCodes.ReinstallRequired
 } finally {
     if ($script:Context.TempRoot -and (Test-Path -LiteralPath $script:Context.TempRoot)) {

@@ -719,6 +719,10 @@ internal static class Program
         public string key { get; set; }
         public string title { get; set; }
         public string message { get; set; }
+        public string reason { get; set; }
+        public string summary { get; set; }
+        public string nextAction { get; set; }
+        public string recoveryCommand { get; set; }
         public int progress { get; set; }
         public string level { get; set; }
         public int code { get; set; }
@@ -1138,12 +1142,8 @@ internal static class Program
                 if (eventType == "result")
                 {
                     pendingResult = uiEvent;
-                    string localizedMessage = LocalizeUiMessage(uiEvent.message);
-                    if (string.IsNullOrWhiteSpace(localizedMessage))
-                    {
-                        localizedMessage = BuildDefaultResultMessage(mode, uiEvent.code, locale);
-                    }
-                    SetStatus(localizedMessage, GetVisualStateFromExitCode(uiEvent.code));
+                    SetStatus(BuildResultStatusMessage(uiEvent, uiEvent.code), GetVisualStateFromExitCode(uiEvent.code));
+                    AppendResultDetails(uiEvent);
                     return true;
                 }
 
@@ -1172,10 +1172,57 @@ internal static class Program
             uiEvent.key = ReadJsonString(json, "key");
             uiEvent.title = ReadJsonString(json, "title");
             uiEvent.message = ReadJsonString(json, "message");
+            uiEvent.reason = ReadJsonString(json, "reason");
+            uiEvent.summary = ReadJsonString(json, "summary");
+            uiEvent.nextAction = ReadJsonString(json, "nextAction");
+            uiEvent.recoveryCommand = ReadJsonString(json, "recoveryCommand");
             uiEvent.level = ReadJsonString(json, "level");
             uiEvent.progress = ReadJsonInt(json, "progress");
             uiEvent.code = ReadJsonInt(json, "code");
             return true;
+        }
+
+        private string BuildResultStatusMessage(UiEvent uiEvent, int code)
+        {
+            if (uiEvent != null)
+            {
+                string localizedSummary = LocalizeUiMessage(uiEvent.summary);
+                if (!string.IsNullOrWhiteSpace(localizedSummary))
+                {
+                    return localizedSummary;
+                }
+
+                string localizedMessage = LocalizeUiMessage(uiEvent.message);
+                if (!string.IsNullOrWhiteSpace(localizedMessage))
+                {
+                    return localizedMessage;
+                }
+            }
+
+            return BuildDefaultResultMessage(mode, code, locale);
+        }
+
+        private void AppendResultDetails(UiEvent uiEvent)
+        {
+            if (uiEvent == null)
+            {
+                return;
+            }
+
+            if (!string.IsNullOrWhiteSpace(uiEvent.reason))
+            {
+                AppendLog("reason: " + uiEvent.reason);
+            }
+
+            if (!string.IsNullOrWhiteSpace(uiEvent.nextAction))
+            {
+                AppendLog(T("下一步：", "Next action: ") + LocalizeUiMessage(uiEvent.nextAction));
+            }
+
+            if (!string.IsNullOrWhiteSpace(uiEvent.recoveryCommand))
+            {
+                AppendLog(T("恢复命令：", "Recovery command: ") + uiEvent.recoveryCommand);
+            }
         }
 
         private static string ReadJsonString(string json, string name)
@@ -1235,11 +1282,7 @@ internal static class Program
                         AppendLog(workerMessage);
                     }
 
-                    string message = BuildDefaultResultMessage(mode, code, locale);
-                    if (pendingResult != null && !string.IsNullOrWhiteSpace(pendingResult.message))
-                    {
-                        message = pendingResult.message;
-                    }
+                    string message = BuildResultStatusMessage(pendingResult, code);
 
                     VisualState state = GetVisualStateFromExitCode(code);
                     if (timedOut)
@@ -1496,9 +1539,13 @@ internal static class Program
             {
                 case "start.prepare": return "准备启动";
                 case "start.environment": return "检查 OpenClaw 环境";
+                case "start.gateway-token": return "检查 Gateway token";
                 case "start.gateway": return "检查 Gateway 状态";
                 case "start.restart": return "启动或重启 Gateway";
+                case "start.rpc": return "验证 Gateway RPC";
+                case "start.dashboard-verify": return "验证 Dashboard";
                 case "start.verify": return "验证可聊天状态";
+                case "start.provider": return "检查模型认证";
                 case "update.prepare": return "准备更新";
                 case "update.read-state": return "读取安装信息";
                 case "update.resolve-target": return "检查目标版本";
@@ -1528,13 +1575,21 @@ internal static class Program
             {
                 case "Preparing the startup checks...": return "正在准备启动检查…";
                 case "Checking the OpenClaw entrypoint and version...": return "正在检查 OpenClaw 入口和版本…";
+                case "Checking local Gateway token readiness...": return "正在检查本机 Gateway token 状态…";
                 case "Checking the current Gateway status...": return "正在检查 Gateway 当前状态…";
                 case "Checking the Gateway background service...": return "正在检查 Gateway 后台服务…";
+                case "Gateway token is missing. Attempting to generate one automatically...": return "当前缺少 Gateway token，正在尝试自动生成…";
                 case "The Gateway background service is loaded.": return "Gateway 后台服务已加载。";
                 case "The Gateway background service is not loaded.": return "Gateway 后台服务未加载。";
                 case "The Gateway background service is registered but not ready. Trying to start it...": return "Gateway 后台服务已注册但尚未就绪，正在尝试启动…";
                 case "The Gateway is already healthy and ready to chat.": return "Gateway 已在线，可直接聊天。";
                 case "Trying to start or restart the Gateway...": return "正在尝试拉起或重启 Gateway…";
+                case "Verifying Gateway RPC health...": return "正在验证 Gateway RPC 健康状态…";
+                case "Verifying Dashboard readiness...": return "正在验证 Dashboard 可用性…";
+                case "Opening the dashboard...": return "正在打开 Dashboard…";
+                case "Checking provider auth readiness...": return "正在检查模型认证状态…";
+                case "Opening the dashboard through the native launcher...": return "正在调用原生 Dashboard 打开流程…";
+                case "The native dashboard command is unavailable. Falling back to the parsed URL...": return "当前版本缺少原生 Dashboard 命令，正在使用兼容地址兜底打开…";
                 case "The Gateway service is loaded but appears unhealthy. Refreshing it...": return "Gateway 服务已加载但当前不健康，正在刷新服务…";
                 case "The Gateway service is loaded but unhealthy. Refreshing it...": return "Gateway 服务已加载但当前不健康，正在刷新服务…";
                 case "The Gateway service is loaded. Refreshing it after update...": return "Gateway 服务已加载，正在于更新后刷新服务…";
@@ -1542,6 +1597,44 @@ internal static class Program
                 case "The official background service is not ready. Switching to a persistent console window...": return "官方后台服务暂未就绪，正在切换到持久运行窗口…";
                 case "The Gateway is only running temporarily. Switching it to persistent mode...": return "已检测到 Gateway 当前只是临时运行，正在切换为持久运行…";
                 case "Start finished. Confirming chat readiness...": return "启动完成，正在确认可聊天状态…";
+                case "Gateway token is still missing. The dashboard may open, but startup will not be treated as a full success.": return "Gateway token 仍未就绪；仪表盘可能可以打开，但不会视为完全成功。";
+                case "Set a Gateway token on the gateway host, then run Start again.": return "请在网关主机上补齐 Gateway token，然后重新运行一键启动。";
+                case "Dashboard verification timed out.": return "Dashboard 预检超时，无法确认可打开状态。";
+                case "Run Repair again or inspect the gateway logs.": return "请重新运行一键修复，或检查网关日志。";
+                case "Dashboard verification failed.": return "Dashboard 预检未通过，当前配置无法稳定引导控制台。";
+                case "Dashboard origin policy drift was detected. Run Repair first.": return "检测到 Dashboard 来源策略漂移，请先运行一键修复。";
+                case "Run Repair first to realign the Dashboard and Gateway configuration.": return "请先运行一键修复，确认 Dashboard 与 Gateway 配置一致。";
+                case "Dashboard verification did not return a usable URL.": return "Dashboard 预检未返回可用地址。";
+                case "Run Repair first and confirm the Control UI address and asset path.": return "请先运行一键修复，确认 Control UI 地址与资源路径正常。";
+                case "Dashboard returned an invalid URL.": return "Dashboard 地址格式无效，无法自动打开。";
+                case "Run Repair first and confirm the dashboard URL configuration.": return "请先运行一键修复，确认 Dashboard 地址配置。";
+                case "The current Dashboard URL is not loopback. One-click Start will not continue through a remote/LAN path.": return "当前 Dashboard 地址不是本机 loopback，一键启动不会再按远程/LAN 路径继续打开。";
+                case "Run Repair first to restore a local dashboard path. For remote access, use Tailscale Serve HTTPS or an SSH tunnel.": return "请先运行一键修复，把 Dashboard 恢复到本机打开路径；远程访问请改用 Tailscale Serve HTTPS 或 SSH tunnel。";
+                case "The installed runtime does not support the native dashboard command.": return "当前版本不支持原生 Dashboard 启动命令。";
+                case "Run Update or Repair first so the dashboard launcher matches this runtime.": return "请先运行一键更新或一键修复，使 Dashboard 启动能力与当前版本一致。";
+                case "Dashboard is open, but provider model auth is still missing.": return "Dashboard 已可打开，但当前模型认证仍未完成。";
+                case "Add an Anthropic setup-token or re-auth the profile.": return "请补齐 Anthropic setup-token 或重新登录相关认证。";
+                case "Complete OpenAI Codex sign-in, then try again.": return "请完成 OpenAI Codex 登录，然后再试。";
+                case "Complete auth for the current provider, then try again.": return "请补齐当前默认 provider 的模型认证，然后再试。";
+                case "Anthropic auth is missing. Opening the targeted repair flow...": return "Anthropic 认证缺失，正在打开定向修复…";
+                case "Anthropic auth is missing. Opening setup-token repair...": return "Anthropic 认证缺失，正在打开 setup-token 修复…";
+                case "Anthropic auth is missing. Opening onboarding repair...": return "Anthropic 认证缺失，正在打开引导修复…";
+                case "OpenAI Codex auth is missing. Opening the targeted repair flow...": return "OpenAI Codex 认证缺失，正在打开定向修复…";
+                case "OpenAI Codex auth is missing. Opening onboarding repair...": return "OpenAI Codex 认证缺失，正在打开引导修复…";
+                case "Provider auth still needs attention. Opening onboarding repair...": return "模型认证仍需处理，正在打开引导修复…";
+                case "Dashboard is not ready to open.": return "Dashboard 当前无法稳定打开。";
+                case "Dashboard failed to open.": return "Dashboard 打开失败。";
+                case "Dashboard opened, but provider auth still needs attention.": return "Dashboard 已打开，但模型认证仍需处理。";
+                case "Gateway is up and the dashboard path is restored, but the Gateway token still needs attention.": return "Gateway 已启动，Dashboard 路径已恢复，但 Gateway token 仍需处理。";
+                case "The OpenClaw entrypoint or version output is invalid.": return "当前 OpenClaw 入口或版本输出异常。";
+                case "Run Update or reinstall OpenClaw first.": return "请先运行一键更新或重新安装。";
+                case "Gateway could not be stabilized.": return "Gateway 未能稳定进入可用状态。";
+                case "The wrapper tried to repair and start the Gateway, but it still did not satisfy persistence and health requirements.": return "已尝试修复并拉起 Gateway，但仍未满足持久化与健康要求。";
+                case "Run Repair first. If it still fails, run Update or reinstall.": return "请先运行一键修复；若仍失败，再执行一键更新或重新安装。";
+                case "A persistent OpenClaw console window was opened to keep the Gateway online.": return "已打开持久运行窗口，并正在通过该窗口维持 Gateway 在线。";
+                case "Gateway is already available on this host. Continuing to open the dashboard.": return "Gateway 已在本机可用，正在继续打开 Dashboard。";
+                case "Gateway was restored to a usable state. Continuing to open the dashboard.": return "Gateway 已恢复到可用状态，正在继续打开 Dashboard。";
+                case "One-click Start finished verifying the local Gateway, dashboard, and provider auth state.": return "一键启动已完成本机 Gateway、Dashboard 和 provider auth 状态确认。";
                 case "Loaded service refresh finished. Confirming chat readiness...": return "服务刷新完成，正在确认可聊天状态…";
                 case "Preparing the update checks...": return "正在准备更新检查…";
                 case "Reading the current installation state...": return "正在读取当前安装状态…";
@@ -1549,11 +1642,19 @@ internal static class Program
                 case "The current installation is already up to date.": return "当前已是最新版本。";
                 case "OpenClaw is already up to date, and a persistent console window was opened.": return "当前已是最新版本，并已打开 OpenClaw 持久运行窗口。";
                 case "OpenClaw is already up to date, and chat readiness was confirmed.": return "当前已是最新版本，且已确认可聊天状态。";
+                case "OpenClaw is already up to date, and post-update health verification passed.": return "当前已是最新版本，后置健康检查已通过。";
+                case "Update verified that the current version is already latest and that the Gateway and dashboard post-checks passed.": return "更新链路确认当前版本已是最新，且 Gateway 与 Dashboard 后置检查已通过。";
+                case "The current version is already latest, but the Gateway post-check failed.": return "当前版本虽已是最新，但 Gateway 后置校验未通过。";
+                case "No new version was needed, but the current installation still is not stable.": return "无需下载新版本，但当前安装仍未达到稳定可用状态。";
                 case "Stopping the Gateway service...": return "正在停止 Gateway 服务…";
                 case "Installing the update. Please wait...": return "正在执行更新安装，请稍候…";
                 case "Restarting the Gateway service...": return "正在重启 Gateway 服务…";
                 case "Update finished. Confirming chat readiness...": return "更新完成，正在确认可聊天状态…";
                 case "The update finished, and a persistent OpenClaw console window was opened.": return "更新已完成，并已打开 OpenClaw 持久运行窗口。";
+                case "The update finished, and the Gateway/dashboard post-checks passed.": return "更新完成，Gateway 与 Dashboard 后置校验通过。";
+                case "The update flow completed and reused the unified post-validation pipeline.": return "更新链路已完成，并复用了统一后置校验。";
+                case "The update finished, but the Gateway did not return to a stable state.": return "更新完成，但 Gateway 未能恢复到稳定状态。";
+                case "The update completed, but Gateway persistence/RPC post-checks failed.": return "更新已执行完成，但 Gateway 持久化/RPC 后置校验失败。";
                 case "Preparing the repair checks...": return "正在准备修复检查…";
                 case "Collecting the current runtime status...": return "正在采集当前运行状态…";
                 case "Trying to restart the Gateway...": return "正在尝试重启 Gateway…";
@@ -1566,6 +1667,19 @@ internal static class Program
                 case "Reinstalling the Gateway service...": return "正在重写 Gateway 服务…";
                 case "Gateway service rewrite finished. Confirming the repair result...": return "服务重写完成，正在确认修复结果…";
                 case "Manual configuration is required. Opening onboarding...": return "需要你完成配置，正在打开配置向导…";
+                case "OpenClaw wrapper is missing before repair.": return "修复前检查发现 OpenClaw wrapper 缺失。";
+                case "The current runtime entrypoint is still invalid before repair.": return "修复前检查发现当前版本入口仍然异常。";
+                case "Run Update first. Reinstall only if Update still fails.": return "请先运行一键更新；若仍失败，再考虑重装。";
+                case "Repair finished, and the Gateway/dashboard post-checks passed.": return "修复完成，Gateway 与 Dashboard 后置校验通过。";
+                case "The repair flow passed the unified post-validation after restart.": return "修复链路在重启后已通过统一后置校验。";
+                case "Doctor repair finished, and a persistent OpenClaw console window was opened.": return "Doctor 修复完成，并已打开持久运行窗口。";
+                case "Doctor repair finished, and the Gateway/dashboard post-checks passed.": return "Doctor 修复完成，Gateway 与 Dashboard 后置校验通过。";
+                case "The unified post-validation passed after Doctor repair.": return "Doctor 修复后已通过统一后置校验。";
+                case "Gateway service rewrite finished, and a persistent OpenClaw console window was opened.": return "Gateway 服务重写完成，并已打开持久运行窗口。";
+                case "Gateway service rewrite finished, and the Gateway/dashboard post-checks passed.": return "Gateway 服务重写完成，Gateway 与 Dashboard 后置校验通过。";
+                case "The unified post-validation passed after the Gateway service rewrite.": return "Gateway 服务重写后已通过统一后置校验。";
+                case "Repair exhausted its fallback steps, but the installation is still unstable.": return "修复链路已执行完所有回退步骤，但当前安装仍不稳定。";
+                case "Restart, Doctor, and service rewrite still did not restore a stable state.": return "重启、Doctor 和服务重写都未能恢复稳定状态。";
                 case "Running the compatibility installer update...": return "正在执行兼容安装器更新…";
                 case "Updating to the latest official OpenClaw version...": return "正在更新到 OpenClaw 官方最新版本…";
                 case "Update finished and the Gateway service was restored.": return "更新完成，已恢复 Gateway 服务。";
