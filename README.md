@@ -1,11 +1,11 @@
-# OpenClaw Windows 一键安装包装层
+# OpenClaw Windows 一键安装包
 
 <p align="center">
   <img src="./assets/readme/openclaw-windows-installer-hero.jpg" alt="OpenClaw Windows Installer Wrapper" width="100%" />
 </p>
 
 <p align="center">
-  面向 Windows 的 OpenClaw 工程化包装层：安装器、一键启动、一键更新、一键修复、Dashboard 自动打开。
+  面向 Windows 的 OpenClaw 一键包：一键安装器、一键启动、一键更新、一键修复。
 </p>
 
 <p align="center">
@@ -13,39 +13,8 @@
   <a href="./LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-0f172a?style=flat-square" /></a>
   <a href="https://github.com/openclaw/openclaw"><img alt="Based on OpenClaw" src="https://img.shields.io/badge/based%20on-OpenClaw-2563eb?style=flat-square" /></a>
 </p>
-
-## One-click Start Model
-
-`OpenClaw-Start.exe` is now defined as a **local-host startup path**:
-
-- ensure a persistent Gateway on the gateway host
-- verify RPC health
-- verify dashboard readiness
-- open the dashboard through native `openclaw dashboard`
-- classify `Gateway token` and `Provider auth` separately
-
-Default mode is `local-stable`. The wrapper no longer treats LAN HTTP, remote proxying, and local loopback as the same one-click path.
-
-Remote access guidance:
-
-- preferred: `Tailscale Serve HTTPS`
-- preferred: `SSH tunnel`
-- breakglass only: plain LAN HTTP with explicit `gateway.controlUi.allowedOrigins`
-
-`OpenClaw-Update.exe` and `OpenClaw-Repair.exe` reuse the same post-validation path for capability cache refresh, token checks, RPC health verification, dashboard verification, and provider-auth classification.
-
-## Reach Pack
-
-`OpenClaw-Reach-Pack.exe` is an **add-on package** for an existing Windows OpenClaw install.
-
-- install `OpenClaw-Setup-Windows-x64.exe` first
-- then run `OpenClaw-Reach-Pack.exe`
-- the Reach pack now fails fast when the main install is missing, instead of silently unpacking for a long time and only failing later
-- the Reach self-extractor now shows a visible progress window during payload extraction and unpacking
-
-## 项目定位
-
-这个仓库不是 OpenClaw 官方主仓，而是一个专门为 **Windows 直装体验** 做的包装层项目。
+## 项目说明
+拒绝一切环境和网络问题！100%成功一键安装！是个win就能装！
 
 它解决的不是“OpenClaw 核心能力怎么写”，而是下面这些 Windows 落地问题：
 
