@@ -2,6 +2,7 @@
   "schemaVersion": 1,
   "packId": "workflow-zone",
   "displayName": "Workflow Zone",
+  "version": "0.1.0",
   "pluginId": "workflow-zone",
   "packageName": "@openclaw/workflow-zone",
   "archiveName": "OpenClaw-Workflow-Pack-Workflow-Zone.zip",
@@ -12,6 +13,7 @@
   ],
   "runtime": {
     "key": "agent-reach",
+    "layout": "agent-reach-v1",
     "commands": [
       "agent-reach",
       "xreach",
