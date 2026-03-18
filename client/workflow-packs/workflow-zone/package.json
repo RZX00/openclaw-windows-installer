@@ -1,0 +1,12 @@
+{
+  "name": "@openclaw/workflow-zone",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Curated workflow-zone skill pack plugin for the Windows installer.",
+  "type": "module",
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}

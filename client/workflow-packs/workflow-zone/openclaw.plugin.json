@@ -1,0 +1,11 @@
+{
+  "id": "workflow-zone",
+  "name": "Workflow Zone",
+  "description": "Curated workflow zone skill pack for the Windows installer.",
+  "skills": ["./skills"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "packId": "workflow-zone",
+  "displayName": "Workflow Zone",
+  "pluginId": "workflow-zone",
+  "packageName": "@openclaw/workflow-zone",
+  "archiveName": "OpenClaw-Workflow-Pack-Workflow-Zone.zip",
+  "installerName": "OpenClaw-Workflow-Pack-Workflow-Zone.exe",
+  "description": "Curated workflow zone add-on package for Windows.",
+  "skills": [
+    "agent-reach"
+  ],
+  "runtime": {
+    "key": "agent-reach",
+    "commands": [
+      "agent-reach",
+      "xreach",
+      "mcporter",
+      "gh",
+      "git"
+    ]
+  }
+}
