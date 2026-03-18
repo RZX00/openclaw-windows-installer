@@ -38,7 +38,8 @@ jobs:
           name: windows-release-assets
           path: |
             ${{ steps.build.outputs.release_dir }}/OpenClaw-Setup-Windows-x64.exe
-            ${{ steps.build.outputs.release_dir }}/OpenClaw-Reach-Pack.exe
+            ${{ steps.build.outputs.release_dir }}/OpenClaw-Workflow-Pack-Workflow-Zone.exe
+            ${{ steps.build.outputs.release_dir }}/OpenClaw-Workflow-Pack-Workflow-Zone.zip
             ${{ steps.build.outputs.release_dir }}/OpenClaw-Start.exe
             ${{ steps.build.outputs.release_dir }}/OpenClaw-Update.exe
             ${{ steps.build.outputs.release_dir }}/OpenClaw-Repair.exe
@@ -51,7 +52,7 @@ jobs:
           generate_release_notes: true
           files: |
             ${{ steps.build.outputs.release_dir }}/OpenClaw-Setup-Windows-x64.exe
-            ${{ steps.build.outputs.release_dir }}/OpenClaw-Reach-Pack.exe
+            ${{ steps.build.outputs.release_dir }}/OpenClaw-Workflow-Pack-Workflow-Zone.exe
             ${{ steps.build.outputs.release_dir }}/OpenClaw-Start.exe
             ${{ steps.build.outputs.release_dir }}/OpenClaw-Update.exe
             ${{ steps.build.outputs.release_dir }}/OpenClaw-Repair.exe

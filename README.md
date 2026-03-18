@@ -34,14 +34,21 @@ Remote access guidance:
 
 `OpenClaw-Update.exe` and `OpenClaw-Repair.exe` reuse the same post-validation path for capability cache refresh, token checks, RPC health verification, dashboard verification, and provider-auth classification.
 
-## Reach Pack
+## Workflow Add-On Packages
 
-`OpenClaw-Reach-Pack.exe` is an **add-on package** for an existing Windows OpenClaw install.
+`OpenClaw-Workflow-Pack-Workflow-Zone.exe` is the first **workflow add-on package** for an existing Windows OpenClaw install.
 
 - install `OpenClaw-Setup-Windows-x64.exe` first
-- then run `OpenClaw-Reach-Pack.exe`
-- the Reach pack now fails fast when the main install is missing, instead of silently unpacking for a long time and only failing later
-- the Reach self-extractor now shows a visible progress window during payload extraction and unpacking
+- then run `OpenClaw-Workflow-Pack-Workflow-Zone.exe`
+- the workflow add-on now uses native `openclaw plugins install <local-archive>` semantics instead of the old Reach-only `copy SKILL.md + wrapper` path
+- Update and Repair will re-verify previously installed workflow add-ons and self-heal them from the local support archive when possible
+- the release also ships `OpenClaw-Workflow-Pack-Workflow-Zone.zip` as a support/debug artifact for native reinstall and troubleshooting
+
+Recommended download order:
+
+1. `OpenClaw-Setup-Windows-x64.exe`
+2. `OpenClaw-Workflow-Pack-Workflow-Zone.exe` when the customer bought the curated workflow package
+3. `OpenClaw-Start.exe`, `OpenClaw-Update.exe`, and `OpenClaw-Repair.exe` for the already-installed environment
 
 ## 项目定位
 

@@ -29,6 +29,16 @@ function Ensure-Directory {
     }
 }
 
+function Read-JsonFile {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "JSON file was not found: $Path"
+    }
+
+    return (Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json)
+}
+
 function Get-ReleaseLauncherDefinitions {
     param([string]$Locale)
 
@@ -133,12 +143,15 @@ function Build-ReleaseLaunchers {
 
 $repoRoot = Split-Path -Path $PSScriptRoot -Parent
 $buildScript = Join-Path $repoRoot "client\build-windows-oneclick-installer.ps1"
-$reachBuildScript = Join-Path $repoRoot "client\build-windows-reach-pack.ps1"
+$workflowPackBuilderScript = Join-Path $repoRoot "client\build-windows-workflow-pack-installer.ps1"
+$workflowPackId = "workflow-zone"
+$workflowPackManifestPath = Join-Path $repoRoot ("client\workflow-packs\{0}\pack-manifest.json" -f $workflowPackId)
+$workflowPackManifest = Read-JsonFile -Path $workflowPackManifestPath
 if (-not (Test-Path -LiteralPath $buildScript)) {
     throw "Build script was not found: $buildScript"
 }
-if (-not (Test-Path -LiteralPath $reachBuildScript)) {
-    throw "Reach build script was not found: $reachBuildScript"
+if (-not (Test-Path -LiteralPath $workflowPackBuilderScript)) {
+    throw "Workflow pack build script was not found: $workflowPackBuilderScript"
 }
 
 if ([string]::IsNullOrWhiteSpace($OutputDir)) {
@@ -150,13 +163,17 @@ Ensure-Directory -Path $OutputDir
 $baseName = "OpenClaw-Setup-Windows-$Architecture"
 $baseFileName = "$baseName.exe"
 $baseFilePath = Join-Path $OutputDir $baseFileName
-$reachFileName = "OpenClaw-Reach-Pack.exe"
-$reachFilePath = Join-Path $OutputDir $reachFileName
+$workflowPackInstallerName = "$($workflowPackManifest.installerName)"
+$workflowPackArchiveName = "$($workflowPackManifest.archiveName)"
+$workflowPackInstallerPath = Join-Path $OutputDir $workflowPackInstallerName
+$workflowPackArchivePath = Join-Path $OutputDir $workflowPackArchiveName
 
 Get-ChildItem -LiteralPath $OutputDir -File -ErrorAction SilentlyContinue |
     Where-Object {
         $_.Name -like "$baseName*.exe" -or
         $_.Name -like "OpenClaw-Reach-Pack*.exe" -or
+        $_.Name -like "OpenClaw-Workflow-Pack-*.exe" -or
+        $_.Name -like "OpenClaw-Workflow-Pack-*.zip" -or
         $_.Name -like "OpenClaw-Start*.exe" -or
         $_.Name -like "OpenClaw-Update*.exe" -or
         $_.Name -like "OpenClaw-Repair*.exe" -or
@@ -176,20 +193,25 @@ if (-not (Test-Path -LiteralPath $baseFilePath)) {
     throw "Release asset was not produced: $baseFilePath"
 }
 
-& $reachBuildScript `
+& $workflowPackBuilderScript `
     -Locale $Locale `
     -Architecture $Architecture `
+    -PackId $workflowPackId `
     -OutputDir $OutputDir `
-    -OutputName $reachFileName
+    -OutputName $workflowPackInstallerName
 
-if (-not (Test-Path -LiteralPath $reachFilePath)) {
-    throw "Reach release asset was not produced: $reachFilePath"
+if (-not (Test-Path -LiteralPath $workflowPackInstallerPath)) {
+    throw "Workflow pack release asset was not produced: $workflowPackInstallerPath"
+}
+if (-not (Test-Path -LiteralPath $workflowPackArchivePath)) {
+    throw "Workflow pack archive asset was not produced: $workflowPackArchivePath"
 }
 
 $launcherPaths = Build-ReleaseLaunchers -OutputDir $OutputDir -Locale $Locale
 
 Write-Host ("[OK] Release asset: {0}" -f $baseFilePath)
-Write-Host ("[OK] Reach asset: {0}" -f $reachFilePath)
+Write-Host ("[OK] Workflow pack installer: {0}" -f $workflowPackInstallerPath)
+Write-Host ("[OK] Workflow pack archive: {0}" -f $workflowPackArchivePath)
 foreach ($launcherPath in $launcherPaths) {
     Write-Host ("[OK] Launcher asset: {0}" -f $launcherPath)
 }

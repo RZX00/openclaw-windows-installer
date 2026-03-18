@@ -72,3 +72,18 @@ release\OpenClaw-Repair.exe
 - `OpenClaw-Repair.exe` 对应一键修复
 
 首次安装请使用 `OpenClaw-Setup-Windows-x64.exe`；其余 3 个 EXE 面向已经安装好的环境。
+## English Release Notes
+
+Current release outputs:
+
+- `OpenClaw-Setup-Windows-x64.exe`
+- `OpenClaw-Workflow-Pack-Workflow-Zone.exe`
+- `OpenClaw-Workflow-Pack-Workflow-Zone.zip`
+- `OpenClaw-Start.exe`
+- `OpenClaw-Update.exe`
+- `OpenClaw-Repair.exe`
+
+Publishing rule:
+
+- Upload the `.exe` workflow add-on to GitHub Releases.
+- Keep the `.zip` workflow archive in the workflow artifact so it can be reused for native reinstall and troubleshooting.

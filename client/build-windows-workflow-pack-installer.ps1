@@ -1,0 +1,1516 @@
+[CmdletBinding()]
+param(
+    [ValidateSet("zh-CN", "en-US")]
+    [string]$Locale = "zh-CN",
+    [ValidateSet("x64", "arm64")]
+    [string]$Architecture = "x64",
+    [string]$PackId = "workflow-zone",
+    [string]$OutputDir,
+    [string]$OutputName,
+    [string]$NodeVersion = "22.22.1",
+    [string]$GitHubCliVersion = "2.88.1",
+    [string]$MinGitVersion = "2.53.0.2",
+    [string]$PythonVersion = "3.12.10",
+    [string]$AgentReachTag = "v1.3.0",
+    [string]$XreachVersion = "0.3.3",
+    [string]$McporterVersion = "0.7.3",
+    [string]$UndiciVersion = "7.24.3",
+    [string]$NpmRegistry = "https://registry.npmjs.org/",
+    [switch]$KeepIntermediate,
+    [switch]$DryRun
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+try {
+    [Net.ServicePointManager]::SecurityProtocol = `
+        [Net.SecurityProtocolType]::Tls12 -bor `
+        [Net.SecurityProtocolType]::Tls11 -bor `
+        [Net.SecurityProtocolType]::Tls
+} catch {}
+
+try {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+} catch {}
+try {
+    Add-Type -AssemblyName Microsoft.CSharp -ErrorAction Stop
+} catch {}
+
+$script:BuildRoot = Join-Path $env:TEMP ("openclaw-workflow-pack-installer-" + [guid]::NewGuid().ToString("N"))
+
+function Write-Info($Message) { Write-Host "[INFO] $Message" -ForegroundColor Cyan }
+function Write-Ok($Message) { Write-Host "[OK] $Message" -ForegroundColor Green }
+function Write-Warn($Message) { Write-Host "[WARN] $Message" -ForegroundColor Yellow }
+function Write-Err($Message) { Write-Host "[ERROR] $Message" -ForegroundColor Red; throw $Message }
+
+function Ensure-Directory {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return
+    }
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        New-Item -ItemType Directory -Path $Path -Force | Out-Null
+    }
+}
+
+function Save-JsonFile {
+    param(
+        [string]$Path,
+        [object]$Object
+    )
+
+    if ($DryRun) {
+        return
+    }
+
+    $json = $Object | ConvertTo-Json -Depth 10
+    [System.IO.File]::WriteAllText($Path, $json, (New-Object System.Text.UTF8Encoding($true)))
+}
+
+function Read-JsonFile {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        Write-Err ("JSON file was not found: {0}" -f $Path)
+    }
+
+    return (Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json)
+}
+
+function Remove-FileWithRetry {
+    param(
+        [string]$Path,
+        [int]$Attempts = 8,
+        [int]$DelayMilliseconds = 750
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $true
+    }
+
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        try {
+            Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+        } catch {
+            if ($attempt -eq $Attempts) {
+                return $false
+            }
+            Start-Sleep -Milliseconds $DelayMilliseconds
+        }
+
+        if (-not (Test-Path -LiteralPath $Path)) {
+            return $true
+        }
+    }
+
+    return (-not (Test-Path -LiteralPath $Path))
+}
+
+function Copy-FileWithRetry {
+    param(
+        [string]$Source,
+        [string]$Destination,
+        [int]$Attempts = 8,
+        [int]$DelayMilliseconds = 750
+    )
+
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        try {
+            Copy-Item -LiteralPath $Source -Destination $Destination -Force -ErrorAction Stop
+            return $true
+        } catch {
+            if ($attempt -eq $Attempts) {
+                throw
+            }
+            Start-Sleep -Milliseconds $DelayMilliseconds
+        }
+    }
+
+    return $false
+}
+
+function Expand-ArchiveFlatten {
+    param(
+        [string]$ZipPath,
+        [string]$Destination
+    )
+
+    Ensure-Directory -Path $Destination
+    if ($DryRun) {
+        return
+    }
+
+    $extractRoot = Join-Path $script:BuildRoot ("extract-" + [guid]::NewGuid().ToString("N"))
+    Ensure-Directory -Path $extractRoot
+    [System.IO.Compression.ZipFile]::ExtractToDirectory($ZipPath, $extractRoot)
+
+    $topDirs = @(Get-ChildItem -LiteralPath $extractRoot -Directory)
+    $topFiles = @(Get-ChildItem -LiteralPath $extractRoot -File)
+    if ($topDirs.Count -eq 1 -and $topFiles.Count -eq 0) {
+        Copy-Item -Path (Join-Path $topDirs[0].FullName '*') -Destination $Destination -Recurse -Force
+    } else {
+        Copy-Item -Path (Join-Path $extractRoot '*') -Destination $Destination -Recurse -Force
+    }
+
+    Remove-Item -LiteralPath $extractRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+function New-DirectoryZipArchive {
+    param(
+        [string]$SourceDir,
+        [string]$DestinationZipPath,
+        [System.IO.Compression.CompressionLevel]$CompressionLevel = [System.IO.Compression.CompressionLevel]::NoCompression
+    )
+
+    if (Test-Path -LiteralPath $DestinationZipPath) {
+        Remove-Item -LiteralPath $DestinationZipPath -Force -ErrorAction SilentlyContinue
+    }
+
+    $archive = [System.IO.Compression.ZipFile]::Open($DestinationZipPath, [System.IO.Compression.ZipArchiveMode]::Create)
+    try {
+        foreach ($file in (Get-ChildItem -Path $SourceDir -Recurse -File)) {
+            $entryName = $file.FullName.Substring($SourceDir.Length).TrimStart('\').Replace('\', '/')
+            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $file.FullName, $entryName, $CompressionLevel) | Out-Null
+        }
+    } finally {
+        $archive.Dispose()
+    }
+}
+
+function Get-IconAssetPath {
+    param([string]$FileName)
+
+    $path = Join-Path $PSScriptRoot ("assets\icons\{0}" -f $FileName)
+    if (-not (Test-Path -LiteralPath $path)) {
+        Write-Err ("Icon asset was not found: {0}" -f $path)
+    }
+
+    return $path
+}
+
+function Get-Win32IconCompilerOption {
+    param([string]$IconPath)
+
+    if ([string]::IsNullOrWhiteSpace($IconPath)) {
+        return $null
+    }
+
+    return ('/win32icon:"{0}"' -f $IconPath.Replace('"', '\"'))
+}
+
+function ConvertTo-CSharpStringLiteral {
+    param([AllowNull()][string]$Value)
+
+    $text = if ($null -eq $Value) { "" } else { [string]$Value }
+    return '"' + $text.Replace('\', '\\').Replace('"', '\"') + '"'
+}
+
+function Compile-CSharpExecutable {
+    param(
+        [string]$SourceCode,
+        [string]$OutputPath,
+        [string[]]$ReferencedAssemblies,
+        [ValidateSet("winexe", "exe")]
+        [string]$Target,
+        [string]$CompilerOption
+    )
+
+    $provider = New-Object Microsoft.CSharp.CSharpCodeProvider
+    try {
+        $compilerParameters = New-Object System.CodeDom.Compiler.CompilerParameters
+        $compilerParameters.GenerateExecutable = $true
+        $compilerParameters.GenerateInMemory = $false
+        $compilerParameters.IncludeDebugInformation = $false
+        $compilerParameters.OutputAssembly = $OutputPath
+
+        foreach ($assemblyName in @($ReferencedAssemblies)) {
+            if (-not [string]::IsNullOrWhiteSpace($assemblyName)) {
+                [void]$compilerParameters.ReferencedAssemblies.Add($assemblyName)
+            }
+        }
+
+        $compilerParameters.CompilerOptions = "/target:$Target"
+        if (-not [string]::IsNullOrWhiteSpace($CompilerOption)) {
+            $compilerParameters.CompilerOptions = "$($compilerParameters.CompilerOptions) $CompilerOption"
+        }
+
+        $result = $provider.CompileAssemblyFromSource($compilerParameters, $SourceCode)
+        if ($result.Errors.HasErrors) {
+            $errors = @($result.Errors | ForEach-Object { $_.ToString() })
+            throw ("C# compile failed: {0}" -f ($errors -join " | "))
+        }
+    } finally {
+        $provider.Dispose()
+    }
+}
+
+function Download-File {
+    param(
+        [string]$Url,
+        [string]$Destination
+    )
+
+    Write-Info ("Downloading: {0}" -f $Url)
+    if ($DryRun) {
+        return
+    }
+
+    Ensure-Directory -Path (Split-Path -Path $Destination -Parent)
+    Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Destination -TimeoutSec 300 -ErrorAction Stop
+}
+
+function Invoke-External {
+    param(
+        [string]$FilePath,
+        [string[]]$Arguments,
+        [string]$WorkingDirectory = $null
+    )
+
+    $argumentList = @($Arguments)
+    Write-Info ("Running: {0} {1}" -f $FilePath, ($argumentList -join " "))
+    if ($DryRun) {
+        return
+    }
+
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        if ([string]::IsNullOrWhiteSpace($WorkingDirectory)) {
+            & $FilePath @argumentList 2>&1 | Out-Host
+        } else {
+            Push-Location $WorkingDirectory
+            try {
+                & $FilePath @argumentList 2>&1 | Out-Host
+            } finally {
+                Pop-Location
+            }
+        }
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err ("Command failed with exit code {0}: {1}" -f $LASTEXITCODE, $FilePath)
+    }
+}
+
+function Get-MinGitReleaseTag {
+    param([string]$Version)
+
+    $match = [regex]::Match($Version, '^(?<base>\d+\.\d+\.\d+)\.(?<patch>\d+)$')
+    if (-not $match.Success) {
+        Write-Err ("MinGit version is not in the expected format: {0}" -f $Version)
+    }
+
+    return ("v{0}.windows.{1}" -f $match.Groups["base"].Value, $match.Groups["patch"].Value)
+}
+
+function Get-ArchitectureDescriptor {
+    switch ($Architecture) {
+        "x64" {
+            return [pscustomobject]@{
+                GhArch = "amd64"
+                PyArch = "amd64"
+                NodeArch = "x64"
+                MinGitFile = ("MinGit-{0}-64-bit.zip" -f $MinGitVersion)
+            }
+        }
+        "arm64" {
+            return [pscustomobject]@{
+                GhArch = "arm64"
+                PyArch = "arm64"
+                NodeArch = "arm64"
+                MinGitFile = ("MinGit-{0}-arm64.zip" -f $MinGitVersion)
+            }
+        }
+    }
+}
+
+function Get-FirstExistingPath {
+    param([string[]]$Candidates)
+
+    foreach ($candidate in @($Candidates)) {
+        if (-not [string]::IsNullOrWhiteSpace($candidate) -and (Test-Path -LiteralPath $candidate)) {
+            return $candidate
+        }
+    }
+
+    return $null
+}
+
+function Get-HostPythonDescriptor {
+    $candidates = @()
+    $py = Get-Command "py.exe" -ErrorAction SilentlyContinue
+    if ($py) {
+        $candidates += [pscustomobject]@{ Path = $py.Source; PrefixArgs = @("-3.12") }
+        $candidates += [pscustomobject]@{ Path = $py.Source; PrefixArgs = @("-3") }
+    }
+
+    $python = Get-Command "python.exe" -ErrorAction SilentlyContinue
+    if ($python) {
+        $candidates += [pscustomobject]@{ Path = $python.Source; PrefixArgs = @() }
+    }
+
+    foreach ($candidate in $candidates) {
+        try {
+            $versionArgs = @($candidate.PrefixArgs) + @("-c", "import sys; print('.'.join(map(str, sys.version_info[:2])))")
+            $versionText = & $candidate.Path @versionArgs
+            if ($LASTEXITCODE -eq 0 -and "$versionText".Trim() -eq "3.12") {
+                return $candidate
+            }
+        } catch {}
+    }
+
+    Write-Err "Python 3.12 is required on the build machine to prepare the embedded payload."
+}
+
+function Invoke-HostPython {
+    param(
+        [object]$PythonDescriptor,
+        [string[]]$Arguments,
+        [string]$WorkingDirectory = $null
+    )
+
+    $allArguments = @($PythonDescriptor.PrefixArgs) + @($Arguments)
+    Invoke-External -FilePath $PythonDescriptor.Path -Arguments $allArguments -WorkingDirectory $WorkingDirectory
+}
+
+function Get-AgentReachArchiveUrl {
+    return ("https://github.com/Panniantong/agent-reach/archive/refs/tags/{0}.zip" -f $AgentReachTag)
+}
+
+function Get-AgentReachSourceVersion {
+    param([string]$SourceRoot)
+
+    $pyprojectPath = Join-Path $SourceRoot "pyproject.toml"
+    $match = Select-String -Path $pyprojectPath -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+    if (-not $match) {
+        Write-Err ("Unable to determine Agent Reach version from: {0}" -f $pyprojectPath)
+    }
+
+    return $match.Matches[0].Groups[1].Value
+}
+
+function Set-PythonEmbedPathFile {
+    param([string]$PythonRoot)
+
+    $pthFile = Get-ChildItem -LiteralPath $PythonRoot -Filter "*._pth" -File | Select-Object -First 1
+    if (-not $pthFile) {
+        Write-Err ("Embedded Python ._pth file was not found in: {0}" -f $PythonRoot)
+    }
+
+    $lines = @(
+        ("python{0}.zip" -f (($PythonVersion -split '\.')[0..1] -join "")),
+        ".",
+        "Lib\site-packages",
+        "import site"
+    )
+
+    if (-not $DryRun) {
+        [System.IO.File]::WriteAllLines($pthFile.FullName, $lines, (New-Object System.Text.ASCIIEncoding))
+    }
+}
+
+function Read-PackageVersion {
+    param([string]$PackageJsonPath)
+
+    if (-not (Test-Path -LiteralPath $PackageJsonPath)) {
+        return $null
+    }
+
+    $json = Get-Content -LiteralPath $PackageJsonPath -Raw | ConvertFrom-Json
+    return $json.version
+}
+
+function Prepare-PortableGit {
+    param(
+        [string]$DownloadDir,
+        [string]$DestinationRoot
+    )
+
+    $arch = Get-ArchitectureDescriptor
+    $releaseTag = Get-MinGitReleaseTag -Version $MinGitVersion
+    $downloadPath = Join-Path $DownloadDir $arch.MinGitFile
+    $url = "https://github.com/git-for-windows/git/releases/download/{0}/{1}" -f $releaseTag, $arch.MinGitFile
+
+    Download-File -Url $url -Destination $downloadPath
+    Expand-ArchiveFlatten -ZipPath $downloadPath -Destination $DestinationRoot
+
+    if (-not $DryRun) {
+        $gitExe = Get-FirstExistingPath -Candidates @(
+            (Join-Path $DestinationRoot "cmd\git.exe"),
+            (Join-Path $DestinationRoot "bin\git.exe"),
+            (Join-Path $DestinationRoot "mingw64\bin\git.exe"),
+            (Join-Path $DestinationRoot "git.exe")
+        )
+        if (-not $gitExe) {
+            Write-Err ("Portable Git did not contain git.exe: {0}" -f $DestinationRoot)
+        }
+    }
+}
+
+function Prepare-GitHubCli {
+    param(
+        [string]$DownloadDir,
+        [string]$DestinationRoot
+    )
+
+    $arch = Get-ArchitectureDescriptor
+    $fileName = "gh_{0}_windows_{1}.zip" -f $GitHubCliVersion, $arch.GhArch
+    $downloadPath = Join-Path $DownloadDir $fileName
+    $url = "https://github.com/cli/cli/releases/download/v{0}/{1}" -f $GitHubCliVersion, $fileName
+
+    Download-File -Url $url -Destination $downloadPath
+    Expand-ArchiveFlatten -ZipPath $downloadPath -Destination $DestinationRoot
+
+    if (-not $DryRun -and -not (Test-Path -LiteralPath (Join-Path $DestinationRoot "bin\gh.exe"))) {
+        Write-Err ("Portable GitHub CLI did not contain bin\gh.exe: {0}" -f $DestinationRoot)
+    }
+}
+
+function Prepare-PortableNode {
+    param(
+        [string]$DownloadDir,
+        [string]$WorkRoot,
+        [string]$DestinationRoot
+    )
+
+    $arch = Get-ArchitectureDescriptor
+    $fileName = "node-v{0}-win-{1}.zip" -f $NodeVersion, $arch.NodeArch
+    $downloadPath = Join-Path $DownloadDir $fileName
+    $url = "https://nodejs.org/dist/v{0}/{1}" -f $NodeVersion, $fileName
+    $npmCache = Join-Path $WorkRoot "npm-cache"
+
+    Download-File -Url $url -Destination $downloadPath
+    Expand-ArchiveFlatten -ZipPath $downloadPath -Destination $DestinationRoot
+
+    if ($DryRun) {
+        return
+    }
+
+    $npmCmd = Join-Path $DestinationRoot "npm.cmd"
+    if (-not (Test-Path -LiteralPath $npmCmd)) {
+        Write-Err ("Portable Node.js did not contain npm.cmd: {0}" -f $DestinationRoot)
+    }
+
+    Ensure-Directory -Path $npmCache
+    $previousCache = $env:npm_config_cache
+    $previousRegistry = $env:npm_config_registry
+    $previousLogLevel = $env:NPM_CONFIG_LOGLEVEL
+    $previousFund = $env:NPM_CONFIG_FUND
+    $previousAudit = $env:NPM_CONFIG_AUDIT
+    $previousNotifier = $env:NPM_CONFIG_UPDATE_NOTIFIER
+    $previousShell = $env:NPM_CONFIG_SCRIPT_SHELL
+
+    try {
+        $env:npm_config_cache = $npmCache
+        $env:npm_config_registry = $NpmRegistry
+        $env:NPM_CONFIG_LOGLEVEL = "error"
+        $env:NPM_CONFIG_FUND = "false"
+        $env:NPM_CONFIG_AUDIT = "false"
+        $env:NPM_CONFIG_UPDATE_NOTIFIER = "false"
+        $env:NPM_CONFIG_SCRIPT_SHELL = "cmd.exe"
+
+        Invoke-External -FilePath $npmCmd -Arguments @(
+            "install",
+            "-g",
+            ("xreach-cli@{0}" -f $XreachVersion),
+            ("mcporter@{0}" -f $McporterVersion),
+            ("undici@{0}" -f $UndiciVersion),
+            "--prefix",
+            $DestinationRoot,
+            "--loglevel",
+            "error",
+            "--fund",
+            "false",
+            "--audit",
+            "false"
+        ) -WorkingDirectory $DestinationRoot
+    } finally {
+        $env:npm_config_cache = $previousCache
+        $env:npm_config_registry = $previousRegistry
+        $env:NPM_CONFIG_LOGLEVEL = $previousLogLevel
+        $env:NPM_CONFIG_FUND = $previousFund
+        $env:NPM_CONFIG_AUDIT = $previousAudit
+        $env:NPM_CONFIG_UPDATE_NOTIFIER = $previousNotifier
+        $env:NPM_CONFIG_SCRIPT_SHELL = $previousShell
+    }
+
+    foreach ($required in @("node.exe", "npm.cmd", "xreach.cmd", "mcporter.cmd")) {
+        if (-not (Test-Path -LiteralPath (Join-Path $DestinationRoot $required))) {
+            Write-Err ("Portable Node payload is missing {0}: {1}" -f $required, $DestinationRoot)
+        }
+    }
+}
+
+function Prepare-PortablePython {
+    param(
+        [string]$DownloadDir,
+        [string]$WorkRoot,
+        [string]$DestinationRoot,
+        [string]$SkillDestinationRoot = $null
+    )
+
+    $arch = Get-ArchitectureDescriptor
+    $fileName = "python-{0}-embed-{1}.zip" -f $PythonVersion, $arch.PyArch
+    $downloadPath = Join-Path $DownloadDir $fileName
+    $sourceZipPath = Join-Path $DownloadDir ("agent-reach-{0}.zip" -f $AgentReachTag.TrimStart('v'))
+    $sourceRoot = Join-Path $WorkRoot "agent-reach-source"
+    $sitePackages = Join-Path $DestinationRoot "Lib\site-packages"
+    $pythonDescriptor = Get-HostPythonDescriptor
+
+    Download-File -Url ("https://www.python.org/ftp/python/{0}/{1}" -f $PythonVersion, $fileName) -Destination $downloadPath
+    Expand-ArchiveFlatten -ZipPath $downloadPath -Destination $DestinationRoot
+    Ensure-Directory -Path $sitePackages
+    Set-PythonEmbedPathFile -PythonRoot $DestinationRoot
+
+    Download-File -Url (Get-AgentReachArchiveUrl) -Destination $sourceZipPath
+    Expand-ArchiveFlatten -ZipPath $sourceZipPath -Destination $sourceRoot
+
+    if ($DryRun) {
+        return [pscustomobject]@{ AgentReachVersion = $null }
+    }
+
+    Invoke-HostPython -PythonDescriptor $pythonDescriptor -Arguments @(
+        "-m", "pip", "install",
+        "--disable-pip-version-check",
+        "--ignore-installed",
+        "--no-warn-conflicts",
+        "--upgrade",
+        "--target", $sitePackages,
+        "pip",
+        "setuptools",
+        "wheel",
+        "browser-cookie3"
+    ) -WorkingDirectory $sourceRoot
+
+    Invoke-HostPython -PythonDescriptor $pythonDescriptor -Arguments @(
+        "-m", "pip", "install",
+        "--disable-pip-version-check",
+        "--ignore-installed",
+        "--no-warn-conflicts",
+        "--upgrade",
+        "--target", $sitePackages,
+        $sourceRoot
+    ) -WorkingDirectory $sourceRoot
+
+    $skillSourcePath = Join-Path $sitePackages "agent_reach\skill\SKILL.md"
+    if (-not (Test-Path -LiteralPath $skillSourcePath)) {
+        Write-Err ("Agent Reach skill was not found after pip install: {0}" -f $skillSourcePath)
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($SkillDestinationRoot)) {
+        Ensure-Directory -Path $SkillDestinationRoot
+        Copy-Item -LiteralPath $skillSourcePath -Destination (Join-Path $SkillDestinationRoot "SKILL.md") -Force
+    }
+
+    if (-not (Test-Path -LiteralPath (Join-Path $sitePackages "agent_reach\cli.py"))) {
+        Write-Err ("Agent Reach package payload was not installed correctly: {0}" -f $sitePackages)
+    }
+
+    return [pscustomobject]@{
+        AgentReachVersion = (Get-AgentReachSourceVersion -SourceRoot $sourceRoot)
+    }
+}
+
+function Get-WorkflowPackRoot {
+    return (Join-Path $PSScriptRoot ("workflow-packs\{0}" -f $PackId))
+}
+
+function Get-WorkflowPackManifestPath {
+    return (Join-Path (Get-WorkflowPackRoot) "pack-manifest.json")
+}
+
+function Resolve-WorkflowPackContract {
+    $manifestPath = Get-WorkflowPackManifestPath
+    $manifest = Read-JsonFile -Path $manifestPath
+
+    if ([string]::IsNullOrWhiteSpace("$($manifest.packId)")) {
+        Write-Err "Workflow pack manifest must define packId."
+    }
+    if ([string]::IsNullOrWhiteSpace("$($manifest.archiveName)")) {
+        Write-Err "Workflow pack manifest must define archiveName."
+    }
+    if ([string]::IsNullOrWhiteSpace("$($manifest.installerName)")) {
+        Write-Err "Workflow pack manifest must define installerName."
+    }
+
+    return [pscustomobject]@{
+        RootPath     = Get-WorkflowPackRoot
+        ManifestPath = $manifestPath
+        Manifest     = $manifest
+    }
+}
+
+function Build-WorkflowPluginArchive {
+    param(
+        [object]$WorkflowPack,
+        [string]$ArchiveOutputDir
+    )
+
+    $builderScript = Join-Path $PSScriptRoot "build-windows-workflow-pack.ps1"
+    if (-not (Test-Path -LiteralPath $builderScript)) {
+        Write-Err ("Workflow pack archive builder was not found: {0}" -f $builderScript)
+    }
+
+    Ensure-Directory -Path $ArchiveOutputDir
+    $archivePath = Join-Path $ArchiveOutputDir "$($WorkflowPack.Manifest.archiveName)"
+    & $builderScript -PackId "$($WorkflowPack.Manifest.packId)" -OutputDir $ArchiveOutputDir -OutputName "$($WorkflowPack.Manifest.archiveName)" -DryRun:$DryRun
+
+    if (-not $DryRun -and -not (Test-Path -LiteralPath $archivePath)) {
+        Write-Err ("Workflow pack archive was not produced: {0}" -f $archivePath)
+    }
+
+    return $archivePath
+}
+
+function Get-EmbeddedLauncherSource {
+    $source = @'
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Drawing;
+using System.IO;
+using System.IO.Compression;
+using System.Security.Principal;
+using System.Text;
+using System.Web.Script.Serialization;
+using System.Windows.Forms;
+
+public static class Program
+{
+    private static readonly byte[] Magic = Encoding.ASCII.GetBytes("OCSFX01");
+    private const string ElevationSentinel = "--openclaw-elevated";
+    private const string UacDeniedMessage = __UAC_DENIED__;
+    private const string ElevationLoopMessage = __ELEVATION_LOOP__;
+    private const string ClosePrompt = __CLOSE_PROMPT__;
+    private const string PayloadExtractMessage = __PAYLOAD_EXTRACT__;
+    private const string PayloadUnpackMessage = __PAYLOAD_UNPACK__;
+    private const string StartingInstallMessage = __STARTING_INSTALL__;
+
+    [STAThread]
+    public static int Main(string[] args)
+    {
+        TryInitializeConsoleEncoding();
+        string extractRoot = null;
+        ProgressForm progressForm = null;
+
+        try
+        {
+            if (!IsAdministrator())
+            {
+                return ElevateSelf(args);
+            }
+
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+
+            string openClawRoot;
+            string preflightFailure;
+            if (!TryEnsureMainInstall(out openClawRoot, out preflightFailure))
+            {
+                MessageBox.Show(
+                    preflightFailure,
+                    "OpenClaw Workflow Pack",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                return 1;
+            }
+
+            progressForm = new ProgressForm();
+            progressForm.Show();
+            progressForm.Activate();
+            progressForm.ReportStatus("Preparing workflow package...", 0, openClawRoot);
+
+            string exePath = Process.GetCurrentProcess().MainModule.FileName;
+            extractRoot = Path.Combine(Path.GetTempPath(), "openclaw-workflow-pack-run-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(extractRoot);
+            string payloadZipPath = Path.Combine(extractRoot, "payload.zip");
+            ExtractPayload(exePath, payloadZipPath, progressForm);
+            ExtractZipWithProgress(payloadZipPath, extractRoot, progressForm);
+            TryDelete(payloadZipPath);
+            progressForm.ReportStatus(StartingInstallMessage + "...", 100, "Launching installer window");
+
+            string runInstallPath = Path.Combine(extractRoot, "run-install.cmd");
+            if (!File.Exists(runInstallPath))
+            {
+                throw new FileNotFoundException("run-install.cmd was not found in the embedded payload.", runInstallPath);
+            }
+
+            ProcessStartInfo startInfo = new ProcessStartInfo("cmd.exe", "/d /s /c \"\"" + runInstallPath + "\"\"")
+            {
+                WorkingDirectory = extractRoot,
+                UseShellExecute = true,
+                WindowStyle = ProcessWindowStyle.Normal
+            };
+
+            progressForm.Close();
+            progressForm = null;
+
+            using (Process process = Process.Start(startInfo))
+            {
+                if (process == null)
+                {
+                    throw new InvalidOperationException("Failed to launch the embedded installer.");
+                }
+
+                process.WaitForExit();
+                TryDeleteDirectory(extractRoot);
+                return process.ExitCode;
+            }
+        }
+        catch (Exception ex)
+        {
+            if (progressForm != null)
+            {
+                progressForm.Close();
+                progressForm = null;
+            }
+
+            MessageBox.Show(
+                ex.Message,
+                "OpenClaw Workflow Pack",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+            TryDeleteDirectory(extractRoot);
+            return 1;
+        }
+    }
+
+    private static bool TryEnsureMainInstall(out string openClawRoot, out string failureMessage)
+    {
+        string defaultRoot = GetDefaultOpenClawRoot();
+        string installStatePath = Path.Combine(defaultRoot, "install-state.json");
+        if (!File.Exists(installStatePath))
+        {
+            openClawRoot = defaultRoot;
+            failureMessage = "Workflow add-on packages require an existing OpenClaw base installation. Install OpenClaw-Setup-Windows-x64.exe first, then run this package again.";
+            return false;
+        }
+
+        openClawRoot = ResolveOpenClawRoot(defaultRoot, installStatePath);
+        string wrapperPath = Path.Combine(openClawRoot, "bin", "openclaw.cmd");
+        if (!File.Exists(wrapperPath))
+        {
+            failureMessage = "The main OpenClaw installation was not found or is incomplete. Run OpenClaw-Setup-Windows-x64.exe or OpenClaw-Repair.exe first.";
+            return false;
+        }
+
+        failureMessage = null;
+        return true;
+    }
+
+    private static string GetDefaultOpenClawRoot()
+    {
+        string programData = Environment.GetEnvironmentVariable("ProgramData");
+        if (string.IsNullOrWhiteSpace(programData))
+        {
+            programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+        }
+
+        if (string.IsNullOrWhiteSpace(programData))
+        {
+            programData = @"C:\ProgramData";
+        }
+
+        return Path.Combine(programData, "OpenClaw");
+    }
+
+    private static string ResolveOpenClawRoot(string defaultRoot, string installStatePath)
+    {
+        try
+        {
+            string json = File.ReadAllText(installStatePath);
+            JavaScriptSerializer serializer = new JavaScriptSerializer();
+            object payload = serializer.DeserializeObject(json);
+            Dictionary<string, object> dictionary = payload as Dictionary<string, object>;
+            string dataRoot = TryGetString(dictionary, "dataRoot");
+            if (!string.IsNullOrWhiteSpace(dataRoot))
+            {
+                return dataRoot;
+            }
+        }
+        catch
+        {
+        }
+
+        return defaultRoot;
+    }
+
+    private static string TryGetString(Dictionary<string, object> dictionary, string key)
+    {
+        if (dictionary == null || string.IsNullOrWhiteSpace(key))
+        {
+            return string.Empty;
+        }
+
+        foreach (KeyValuePair<string, object> entry in dictionary)
+        {
+            if (string.Equals(entry.Key, key, StringComparison.OrdinalIgnoreCase))
+            {
+                return entry.Value == null ? string.Empty : Convert.ToString(entry.Value);
+            }
+        }
+
+        return string.Empty;
+    }
+
+    private static bool IsAdministrator()
+    {
+        try
+        {
+            WindowsIdentity identity = WindowsIdentity.GetCurrent();
+            WindowsPrincipal principal = new WindowsPrincipal(identity);
+            return principal.IsInRole(WindowsBuiltInRole.Administrator);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static int ElevateSelf(string[] args)
+    {
+        if (ContainsSentinel(args))
+        {
+            throw new InvalidOperationException(ElevationLoopMessage);
+        }
+
+        string exePath = Process.GetCurrentProcess().MainModule.FileName;
+        string[] elevatedArgs = PrependSentinel(args);
+        string argumentLine = BuildCommandLine(elevatedArgs);
+        string workingDirectory = Path.GetDirectoryName(exePath);
+        if (string.IsNullOrEmpty(workingDirectory))
+        {
+            workingDirectory = Environment.CurrentDirectory;
+        }
+
+        try
+        {
+            ProcessStartInfo startInfo = new ProcessStartInfo(exePath, argumentLine)
+            {
+                UseShellExecute = true,
+                Verb = "runas",
+                WorkingDirectory = workingDirectory
+            };
+
+            using (Process process = Process.Start(startInfo))
+            {
+                if (process == null)
+                {
+                    throw new InvalidOperationException("Failed to relaunch the installer with administrator permissions.");
+                }
+
+                process.WaitForExit();
+                return process.ExitCode;
+            }
+        }
+        catch (Win32Exception ex)
+        {
+            if (ex.NativeErrorCode == 1223)
+            {
+                TryWriteErrorLine("[ERROR] " + UacDeniedMessage);
+                return 1;
+            }
+
+            throw;
+        }
+    }
+
+    private static bool ContainsSentinel(string[] args)
+    {
+        foreach (string arg in args)
+        {
+            if (string.Equals(arg, ElevationSentinel, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static string[] PrependSentinel(string[] args)
+    {
+        string[] elevatedArgs = new string[args.Length + 1];
+        elevatedArgs[0] = ElevationSentinel;
+        Array.Copy(args, 0, elevatedArgs, 1, args.Length);
+        return elevatedArgs;
+    }
+
+    private static string BuildCommandLine(string[] args)
+    {
+        List<string> quotedArgs = new List<string>();
+        foreach (string arg in args)
+        {
+            quotedArgs.Add(QuoteArgument(arg));
+        }
+
+        return string.Join(" ", quotedArgs.ToArray());
+    }
+
+    private static string QuoteArgument(string arg)
+    {
+        if (arg == null || arg.Length == 0)
+        {
+            return "\"\"";
+        }
+
+        bool needsQuotes = false;
+        foreach (char c in arg)
+        {
+            if (char.IsWhiteSpace(c) || c == '"')
+            {
+                needsQuotes = true;
+                break;
+            }
+        }
+
+        if (!needsQuotes)
+        {
+            return arg;
+        }
+
+        StringBuilder builder = new StringBuilder();
+        builder.Append('"');
+        int backslashCount = 0;
+
+        foreach (char c in arg)
+        {
+            if (c == '\\')
+            {
+                backslashCount++;
+                continue;
+            }
+
+            if (c == '"')
+            {
+                builder.Append('\\', backslashCount * 2 + 1);
+                builder.Append('"');
+                backslashCount = 0;
+                continue;
+            }
+
+            if (backslashCount > 0)
+            {
+                builder.Append('\\', backslashCount);
+                backslashCount = 0;
+            }
+
+            builder.Append(c);
+        }
+
+        if (backslashCount > 0)
+        {
+            builder.Append('\\', backslashCount * 2);
+        }
+
+        builder.Append('"');
+        return builder.ToString();
+    }
+
+    private static void ExtractPayload(string exePath, string payloadZipPath, ProgressForm progressForm)
+    {
+        using (FileStream input = File.OpenRead(exePath))
+        {
+            int footerSize = Magic.Length + sizeof(long);
+            if (input.Length < footerSize)
+            {
+                throw new InvalidDataException("The embedded payload footer is missing.");
+            }
+
+            input.Seek(-footerSize, SeekOrigin.End);
+            byte[] footer = new byte[footerSize];
+            ReadExactly(input, footer, 0, footer.Length);
+
+            for (int index = 0; index < Magic.Length; index++)
+            {
+                if (footer[index] != Magic[index])
+                {
+                    throw new InvalidDataException("The embedded payload marker is invalid.");
+                }
+            }
+
+            long payloadSize = BitConverter.ToInt64(footer, Magic.Length);
+            long payloadOffset = input.Length - footerSize - payloadSize;
+            if (payloadSize <= 0 || payloadOffset < 0)
+            {
+                throw new InvalidDataException("The embedded payload length is invalid.");
+            }
+
+            input.Seek(payloadOffset, SeekOrigin.Begin);
+            using (FileStream output = File.Create(payloadZipPath))
+            {
+                CopyExactly(input, output, payloadSize, PayloadExtractMessage, progressForm);
+            }
+        }
+    }
+
+    private static void ReadExactly(Stream input, byte[] buffer, int offset, int count)
+    {
+        while (count > 0)
+        {
+            int read = input.Read(buffer, offset, count);
+            if (read <= 0)
+            {
+                throw new EndOfStreamException("Unexpected end of file while reading the embedded payload footer.");
+            }
+
+            offset += read;
+            count -= read;
+        }
+    }
+
+    private static void CopyExactly(Stream input, Stream output, long bytesToCopy, string activity, ProgressForm progressForm)
+    {
+        byte[] buffer = new byte[1024 * 1024];
+        long remaining = bytesToCopy;
+        long copied = 0;
+        int lastPercent = -1;
+
+        while (remaining > 0)
+        {
+            int chunk = remaining > buffer.Length ? buffer.Length : (int)remaining;
+            int read = input.Read(buffer, 0, chunk);
+            if (read <= 0)
+            {
+                throw new EndOfStreamException("Unexpected end of file while reading the embedded payload.");
+            }
+
+            output.Write(buffer, 0, read);
+            remaining -= read;
+            copied += read;
+            lastPercent = RenderProgress(activity, copied, bytesToCopy, lastPercent, null, progressForm);
+        }
+
+        RenderProgress(activity, bytesToCopy, bytesToCopy, lastPercent, null, progressForm);
+        TryWriteLine();
+    }
+
+    private static void ExtractZipWithProgress(string zipPath, string destination, ProgressForm progressForm)
+    {
+        using (ZipArchive archive = ZipFile.OpenRead(zipPath))
+        {
+            List<ZipArchiveEntry> fileEntries = new List<ZipArchiveEntry>();
+            foreach (ZipArchiveEntry entry in archive.Entries)
+            {
+                if (!string.IsNullOrEmpty(entry.Name))
+                {
+                    fileEntries.Add(entry);
+                }
+            }
+
+            int totalFiles = Math.Max(1, fileEntries.Count);
+            int processedFiles = 0;
+            int lastPercent = -1;
+
+            foreach (ZipArchiveEntry entry in archive.Entries)
+            {
+                string relativePath = entry.FullName.Replace('/', Path.DirectorySeparatorChar);
+                string targetPath = Path.Combine(destination, relativePath);
+
+                if (string.IsNullOrEmpty(entry.Name))
+                {
+                    Directory.CreateDirectory(targetPath);
+                    continue;
+                }
+
+                string directory = Path.GetDirectoryName(targetPath);
+                if (!string.IsNullOrEmpty(directory))
+                {
+                    Directory.CreateDirectory(directory);
+                }
+
+                entry.ExtractToFile(targetPath, true);
+                processedFiles++;
+                lastPercent = RenderProgress(PayloadUnpackMessage, processedFiles, totalFiles, lastPercent, processedFiles + "/" + totalFiles, progressForm);
+            }
+
+            RenderProgress(PayloadUnpackMessage, totalFiles, totalFiles, lastPercent, totalFiles + "/" + totalFiles, progressForm);
+            TryWriteLine();
+        }
+    }
+
+    private static int RenderProgress(string activity, long current, long total, int lastPercent, string suffix, ProgressForm progressForm)
+    {
+        if (total <= 0)
+        {
+            total = 1;
+        }
+
+        int percent = (int)Math.Max(0, Math.Min(100, (current * 100L) / total));
+        if (progressForm != null)
+        {
+            progressForm.ReportStatus(activity, percent, suffix);
+        }
+
+        if (percent == lastPercent && current < total)
+        {
+            return lastPercent;
+        }
+
+        string line = "\r[INFO] " + activity + ": " + percent.ToString("D3") + "%";
+        if (!string.IsNullOrEmpty(suffix))
+        {
+            line += " (" + suffix + ")";
+        }
+
+        TryWrite(line.PadRight(GetSafeConsoleWidth(line.Length)));
+        return percent;
+    }
+
+    private static void TryInitializeConsoleEncoding()
+    {
+        try
+        {
+            Console.OutputEncoding = Encoding.UTF8;
+        }
+        catch
+        {
+        }
+    }
+
+    private static void TryWriteLine()
+    {
+        try
+        {
+            Console.WriteLine();
+        }
+        catch
+        {
+        }
+    }
+
+    private static void TryWrite(string value)
+    {
+        try
+        {
+            Console.Write(value);
+        }
+        catch
+        {
+        }
+    }
+
+    private static void TryWriteErrorLine(string value)
+    {
+        try
+        {
+            Console.Error.WriteLine(value);
+        }
+        catch
+        {
+        }
+    }
+
+    private static int GetSafeConsoleWidth(int fallback)
+    {
+        try
+        {
+            if (Console.BufferWidth > 1)
+            {
+                return Console.BufferWidth - 1;
+            }
+        }
+        catch
+        {
+        }
+
+        return Math.Max(1, fallback);
+    }
+
+    private static void TryDelete(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    private static void TryDeleteDirectory(string path)
+    {
+        try
+        {
+            if (Directory.Exists(path))
+            {
+                Directory.Delete(path, true);
+            }
+        }
+        catch
+        {
+        }
+    }
+
+}
+
+internal sealed class ProgressForm : Form
+{
+    private readonly Label titleLabel;
+    private readonly Label detailLabel;
+    private readonly ProgressBar progressBar;
+
+    public ProgressForm()
+    {
+        Text = "OpenClaw Workflow Pack";
+        StartPosition = FormStartPosition.CenterScreen;
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = false;
+        MinimizeBox = false;
+        ControlBox = false;
+        ShowIcon = false;
+        ShowInTaskbar = true;
+        TopMost = true;
+        BackColor = Color.White;
+        ClientSize = new Size(520, 148);
+        Font = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
+
+        titleLabel = new Label();
+        titleLabel.Left = 20;
+        titleLabel.Top = 20;
+        titleLabel.Width = 480;
+        titleLabel.Height = 26;
+        titleLabel.Font = new Font("Segoe UI Semibold", 12F, FontStyle.Bold, GraphicsUnit.Point);
+        titleLabel.Text = "Preparing workflow package...";
+        Controls.Add(titleLabel);
+
+        detailLabel = new Label();
+        detailLabel.Left = 20;
+        detailLabel.Top = 52;
+        detailLabel.Width = 480;
+        detailLabel.Height = 34;
+        detailLabel.ForeColor = Color.FromArgb(88, 96, 105);
+        detailLabel.Text = "Starting...";
+        Controls.Add(detailLabel);
+
+        progressBar = new ProgressBar();
+        progressBar.Left = 20;
+        progressBar.Top = 98;
+        progressBar.Width = 480;
+        progressBar.Height = 20;
+        progressBar.Minimum = 0;
+        progressBar.Maximum = 100;
+        progressBar.Style = ProgressBarStyle.Continuous;
+        Controls.Add(progressBar);
+    }
+
+    public void ReportStatus(string activity, int percent, string detail)
+    {
+        if (IsDisposed)
+        {
+            return;
+        }
+
+        titleLabel.Text = string.IsNullOrWhiteSpace(activity) ? "Preparing workflow package..." : activity;
+        progressBar.Value = Math.Max(progressBar.Minimum, Math.Min(progressBar.Maximum, percent));
+        detailLabel.Text = string.IsNullOrWhiteSpace(detail) ? (percent.ToString() + "%") : detail;
+        Refresh();
+        Application.DoEvents();
+    }
+}
+'@
+
+    $source = $source.Replace("__UAC_DENIED__", (ConvertTo-CSharpStringLiteral "Administrator permission was not granted. Installation was cancelled."))
+    $source = $source.Replace("__ELEVATION_LOOP__", (ConvertTo-CSharpStringLiteral "The installer requested elevation, but administrator rights are still unavailable."))
+    $source = $source.Replace("__CLOSE_PROMPT__", (ConvertTo-CSharpStringLiteral "Press any key to close..."))
+    $source = $source.Replace("__PAYLOAD_EXTRACT__", (ConvertTo-CSharpStringLiteral "Extracting installer payload"))
+    $source = $source.Replace("__PAYLOAD_UNPACK__", (ConvertTo-CSharpStringLiteral "Unpacking installer files"))
+    $source = $source.Replace("__STARTING_INSTALL__", (ConvertTo-CSharpStringLiteral "Starting installer"))
+    return $source
+}
+
+function New-RunInstallCmd {
+    param([string]$StageDir)
+
+    $installLine = 'powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0\install-windows-workflow-pack.ps1" -Locale "{0}" -InvokerRoot "%~dp0" -PackId "{1}"' -f $Locale, $PackId
+    $lines = @(
+        '@echo off',
+        'setlocal',
+        'cd /d "%~dp0"',
+        $installLine,
+        'set "EXITCODE=%ERRORLEVEL%"',
+        'if not "%EXITCODE%"=="0" (',
+        '  echo.',
+        '  echo Installation failed. Press any key to close this window.',
+        '  pause >nul',
+        ')',
+        'start "" /min cmd.exe /d /c "ping 127.0.0.1 -n 4 >nul & rmdir /s /q ""%~dp0"""',
+        'exit /b %EXITCODE%'
+    )
+
+    $path = Join-Path $StageDir "run-install.cmd"
+    if (-not $DryRun) {
+        [System.IO.File]::WriteAllLines($path, $lines, (New-Object System.Text.ASCIIEncoding))
+    }
+    return $path
+}
+
+function New-EmbeddedOneClickExecutable {
+    param(
+        [string]$StageDir,
+        [string]$OutputExePath
+    )
+
+    $payloadZipPath = Join-Path $script:BuildRoot "workflow-pack-payload.zip"
+    $stubExePath = Join-Path $script:BuildRoot "workflow-pack-stub.exe"
+
+    if (Test-Path -LiteralPath $payloadZipPath) { Remove-Item -LiteralPath $payloadZipPath -Force -ErrorAction SilentlyContinue }
+    if (Test-Path -LiteralPath $stubExePath) { Remove-Item -LiteralPath $stubExePath -Force -ErrorAction SilentlyContinue }
+    if (Test-Path -LiteralPath $OutputExePath) {
+        if (-not (Remove-FileWithRetry -Path $OutputExePath)) {
+            Write-Err ("The existing output executable is locked and could not be removed: {0}" -f $OutputExePath)
+        }
+    }
+
+    New-DirectoryZipArchive -SourceDir $StageDir -DestinationZipPath $payloadZipPath -CompressionLevel ([System.IO.Compression.CompressionLevel]::NoCompression)
+    $iconPath = Get-IconAssetPath -FileName "openclaw-installer.ico"
+    $compilerOption = Get-Win32IconCompilerOption -IconPath $iconPath
+    Compile-CSharpExecutable `
+        -SourceCode (Get-EmbeddedLauncherSource) `
+        -OutputPath $stubExePath `
+        -ReferencedAssemblies @("System.dll", "System.Core.dll", "System.Drawing.dll", "System.Windows.Forms.dll", "System.Web.Extensions.dll", "System.IO.Compression.dll", "System.IO.Compression.FileSystem.dll") `
+        -Target "winexe" `
+        -CompilerOption $compilerOption
+
+    Copy-FileWithRetry -Source $stubExePath -Destination $OutputExePath | Out-Null
+
+    $payloadLength = (Get-Item -LiteralPath $payloadZipPath).Length
+    $magic = [System.Text.Encoding]::ASCII.GetBytes("OCSFX01")
+    $lengthBytes = [BitConverter]::GetBytes([Int64]$payloadLength)
+    $payloadStream = [System.IO.File]::OpenRead($payloadZipPath)
+    $outputStream = [System.IO.File]::Open($OutputExePath, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
+    try {
+        $payloadStream.CopyTo($outputStream)
+        $outputStream.Write($magic, 0, $magic.Length)
+        $outputStream.Write($lengthBytes, 0, $lengthBytes.Length)
+    } finally {
+        $outputStream.Dispose()
+        $payloadStream.Dispose()
+    }
+}
+
+function Build-WorkflowPackInstaller {
+    $repoRoot = Split-Path -Path $PSScriptRoot -Parent
+    $workflowPack = Resolve-WorkflowPackContract
+    $effectiveOutputDir = if ([string]::IsNullOrWhiteSpace($OutputDir)) { Join-Path $repoRoot "release" } else { $OutputDir }
+    $effectiveOutputName = if ([string]::IsNullOrWhiteSpace($OutputName)) {
+        "$($workflowPack.Manifest.installerName)"
+    } elseif ($OutputName -like "*.exe") {
+        $OutputName
+    } else {
+        "$OutputName.exe"
+    }
+    $outputExePath = Join-Path $effectiveOutputDir $effectiveOutputName
+
+    Ensure-Directory -Path $effectiveOutputDir
+    Ensure-Directory -Path $script:BuildRoot
+
+    $downloadDir = Join-Path $script:BuildRoot "downloads"
+    $pluginArchiveDir = Join-Path $script:BuildRoot "plugin"
+    $workRoot = Join-Path $script:BuildRoot "work"
+    $stageDir = Join-Path $script:BuildRoot "stage"
+    $runtimeRoot = Join-Path $stageDir "runtime"
+    $pluginArchivePath = Build-WorkflowPluginArchive -WorkflowPack $workflowPack -ArchiveOutputDir $pluginArchiveDir
+    $runtimeSpec = $workflowPack.Manifest.runtime
+    $requiresAgentReachRuntime = ($null -ne $runtimeSpec -and "$($runtimeSpec.key)" -eq "agent-reach" -and "$($runtimeSpec.layout)" -eq "agent-reach-v1")
+
+    foreach ($path in @($downloadDir, $pluginArchiveDir, $workRoot, $stageDir, $(if ($requiresAgentReachRuntime) { $runtimeRoot } else { $null }))) {
+        Ensure-Directory -Path $path
+    }
+
+    $manifest = [ordered]@{
+        schemaVersion = 1
+        packId = "$($workflowPack.Manifest.packId)"
+        locale = $Locale
+        architecture = $Architecture
+        builtAt = (Get-Date).ToString("o")
+        archiveName = "$($workflowPack.Manifest.archiveName)"
+        installerName = $effectiveOutputName
+        runtimeKey = $(if ($runtimeSpec) { "$($runtimeSpec.key)" } else { $null })
+        runtimeLayout = $(if ($runtimeSpec) { "$($runtimeSpec.layout)" } else { $null })
+    }
+
+    if ($requiresAgentReachRuntime) {
+        Write-Info ("Preparing offline workflow runtime for pack '{0}' ({1})" -f $workflowPack.Manifest.packId, $Architecture)
+        $toolsRoot = Join-Path $runtimeRoot "tools"
+        $pythonMetadata = [pscustomobject]@{
+            AgentReachVersion = $null
+        }
+
+        if (-not $DryRun) {
+            Prepare-PortableGit -DownloadDir $downloadDir -DestinationRoot (Join-Path $toolsRoot "git")
+            Prepare-GitHubCli -DownloadDir $downloadDir -DestinationRoot (Join-Path $toolsRoot "gh")
+            Prepare-PortableNode -DownloadDir $downloadDir -WorkRoot $workRoot -DestinationRoot (Join-Path $toolsRoot "node")
+            $pythonMetadata = Prepare-PortablePython `
+                -DownloadDir $downloadDir `
+                -WorkRoot $workRoot `
+                -DestinationRoot (Join-Path $toolsRoot "python")
+        }
+
+        $manifest.runtime = [ordered]@{
+            key = "$($runtimeSpec.key)"
+            layout = "$($runtimeSpec.layout)"
+            pythonVersion = $PythonVersion
+            nodeVersion = $NodeVersion
+            gitHubCliVersion = $GitHubCliVersion
+            minGitVersion = $MinGitVersion
+            agentReachTag = $AgentReachTag
+            agentReachVersion = $pythonMetadata.AgentReachVersion
+            xreachVersion = if ($DryRun) { $XreachVersion } else { Read-PackageVersion -PackageJsonPath (Join-Path $toolsRoot "node\node_modules\xreach-cli\package.json") }
+            mcporterVersion = if ($DryRun) { $McporterVersion } else { Read-PackageVersion -PackageJsonPath (Join-Path $toolsRoot "node\node_modules\mcporter\package.json") }
+            undiciVersion = if ($DryRun) { $UndiciVersion } else { Read-PackageVersion -PackageJsonPath (Join-Path $toolsRoot "node\node_modules\undici\package.json") }
+        }
+    } elseif ($null -ne $runtimeSpec -and -not [string]::IsNullOrWhiteSpace("$($runtimeSpec.key)")) {
+        Write-Warn ("Workflow pack runtime '{0}' is declared but not handled by this installer builder yet. The EXE will only include the plugin archive." -f $runtimeSpec.key)
+    }
+
+    Save-JsonFile -Path (Join-Path $stageDir "build-manifest.json") -Object ([pscustomobject]$manifest)
+
+    if (-not $DryRun) {
+        Copy-Item -LiteralPath $workflowPack.ManifestPath -Destination (Join-Path $stageDir "pack-manifest.json") -Force
+        Copy-Item -LiteralPath $pluginArchivePath -Destination (Join-Path $stageDir "$($workflowPack.Manifest.archiveName)") -Force
+        Copy-Item -LiteralPath $pluginArchivePath -Destination (Join-Path $effectiveOutputDir "$($workflowPack.Manifest.archiveName)") -Force
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot "install-windows-workflow-pack.ps1") -Destination (Join-Path $stageDir "install-windows-workflow-pack.ps1") -Force
+    }
+    [void](New-RunInstallCmd -StageDir $stageDir)
+
+    if ($DryRun) {
+        Write-Ok ("Dry run complete. Workflow pack installer would be written to: {0}" -f $outputExePath)
+        return
+    }
+
+    Write-Info ("Building self-extracting workflow pack installer: {0}" -f $outputExePath)
+    New-EmbeddedOneClickExecutable -StageDir $stageDir -OutputExePath $outputExePath
+
+    if (-not (Test-Path -LiteralPath $outputExePath)) {
+        Write-Err ("Workflow pack installer was not produced: {0}" -f $outputExePath)
+    }
+
+    if ($KeepIntermediate) {
+        $intermediateDir = Join-Path $effectiveOutputDir ("intermediate-workflow-pack-installer-" + (Get-Date -Format "yyyyMMdd-HHmmss"))
+        $downloadCopyDir = Join-Path $intermediateDir "downloads"
+        Ensure-Directory -Path $intermediateDir
+        Ensure-Directory -Path $downloadCopyDir
+        Copy-Item -Path (Join-Path $stageDir '*') -Destination $intermediateDir -Recurse -Force
+        Copy-Item -Path (Join-Path $downloadDir '*') -Destination $downloadCopyDir -Recurse -Force
+    }
+
+    Write-Ok ("Workflow pack installer created: {0}" -f $outputExePath)
+}
+
+try {
+    Build-WorkflowPackInstaller
+} finally {
+    if (-not $KeepIntermediate -and $script:BuildRoot -and (Test-Path -LiteralPath $script:BuildRoot)) {
+        Remove-Item -LiteralPath $script:BuildRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
