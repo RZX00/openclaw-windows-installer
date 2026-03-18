@@ -1083,6 +1083,417 @@ function Persist-InstallState {
     $script:Context.State = [pscustomobject]$payload
 }
 
+function Resolve-ExistingPath {
+    param([string[]]$Candidates)
+
+    foreach ($candidate in @($Candidates)) {
+        if (-not [string]::IsNullOrWhiteSpace("$candidate") -and (Test-Path -LiteralPath $candidate)) {
+            return "$candidate"
+        }
+    }
+
+    return $null
+}
+
+function Get-CommandResultSummary {
+    param(
+        [object]$Result,
+        [string]$SuccessFallback = "Command completed successfully.",
+        [string]$FailureFallback = "Command returned a non-zero exit code."
+    )
+
+    $lines = @($Result.Output | ForEach-Object { "$_" } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($lines.Count -gt 0) {
+        return $lines[0].Trim()
+    }
+
+    if ($Result.TimedOut) {
+        return "Command timed out."
+    }
+
+    if ($Result.ExitCode -eq 0) {
+        return $SuccessFallback
+    }
+
+    return $FailureFallback
+}
+
+function Get-WorkflowPackSupportDirectory {
+    param([object]$State = (Resolve-InstallState))
+
+    $supportDir = Get-StateProperty -State $State -Name "supportDir" -Default $script:Context.SupportRoot
+    if ([string]::IsNullOrWhiteSpace("$supportDir")) {
+        return $null
+    }
+
+    return (Join-Path $supportDir "workflow-packs")
+}
+
+function Resolve-WorkflowPackArchivePath {
+    param(
+        [object]$ExistingState,
+        [object]$Manifest,
+        [string]$SupportRoot
+    )
+
+    $existingArchivePath = Get-StateProperty -State $ExistingState -Name "archivePath"
+    $manifestArchiveName = if ($null -ne $Manifest -and -not [string]::IsNullOrWhiteSpace("$($Manifest.archiveName)")) {
+        "$($Manifest.archiveName)"
+    } else {
+        $null
+    }
+
+    $fallbackArchivePath = $null
+    if (-not [string]::IsNullOrWhiteSpace($SupportRoot) -and (Test-Path -LiteralPath $SupportRoot)) {
+        $fallbackArchivePath = @(Get-ChildItem -LiteralPath $SupportRoot -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Extension -in @(".zip", ".tgz") } |
+            Select-Object -First 1 -ExpandProperty FullName)
+    }
+
+    return (Resolve-ExistingPath -Candidates @(
+        $existingArchivePath,
+        $(if (-not [string]::IsNullOrWhiteSpace($SupportRoot) -and -not [string]::IsNullOrWhiteSpace($manifestArchiveName)) { Join-Path $SupportRoot $manifestArchiveName } else { $null }),
+        $fallbackArchivePath
+    ))
+}
+
+function Resolve-InstalledWorkflowPacks {
+    param([object]$State = (Resolve-InstallState))
+
+    $resolved = New-Object System.Collections.Generic.List[object]
+    $seenPackIds = New-Object System.Collections.Generic.List[string]
+    $workflowPackRoot = Get-WorkflowPackSupportDirectory -State $State
+    $existingPacks = Convert-StateLikeToOrderedMap -InputObject (Get-StateProperty -State $State -Name "workflowPacks")
+
+    foreach ($entryKey in @($existingPacks.Keys)) {
+        $existingState = $existingPacks[$entryKey]
+        $packId = Get-StateProperty -State $existingState -Name "packId" -Default "$entryKey"
+        if ([string]::IsNullOrWhiteSpace($packId)) {
+            continue
+        }
+
+        Add-UniqueString -List $seenPackIds -Value $packId
+        $existingSupportRoot = Get-StateProperty -State $existingState -Name "supportRoot"
+        $packSupportRoot = if (-not [string]::IsNullOrWhiteSpace("$existingSupportRoot")) {
+            "$existingSupportRoot"
+        } elseif (-not [string]::IsNullOrWhiteSpace($workflowPackRoot)) {
+            Join-Path $workflowPackRoot $packId
+        } else {
+            $null
+        }
+
+        $manifestPath = Resolve-ExistingPath -Candidates @(
+            (Get-StateProperty -State $existingState -Name "manifestPath"),
+            $(if (-not [string]::IsNullOrWhiteSpace($packSupportRoot)) { Join-Path $packSupportRoot "pack-manifest.json" } else { $null })
+        )
+        $manifest = Read-JsonFileSafe -Path $manifestPath
+        if ($manifest -and [string]::IsNullOrWhiteSpace($packId) -and -not [string]::IsNullOrWhiteSpace("$($manifest.packId)")) {
+            $packId = "$($manifest.packId)"
+        }
+
+        $pluginId = if ($manifest -and -not [string]::IsNullOrWhiteSpace("$($manifest.pluginId)")) {
+            "$($manifest.pluginId)"
+        } elseif (-not [string]::IsNullOrWhiteSpace("$(Get-StateProperty -State $existingState -Name 'pluginId')")) {
+            "$(Get-StateProperty -State $existingState -Name 'pluginId')"
+        } else {
+            $packId
+        }
+
+        $displayName = if ($manifest -and -not [string]::IsNullOrWhiteSpace("$($manifest.displayName)")) {
+            "$($manifest.displayName)"
+        } elseif (-not [string]::IsNullOrWhiteSpace("$(Get-StateProperty -State $existingState -Name 'displayName')")) {
+            "$(Get-StateProperty -State $existingState -Name 'displayName')"
+        } else {
+            $packId
+        }
+
+        $resolved.Add([pscustomobject]@{
+            PackId       = $packId
+            DisplayName  = $displayName
+            PluginId     = $pluginId
+            Version      = $(if ($manifest -and -not [string]::IsNullOrWhiteSpace("$($manifest.version)")) { "$($manifest.version)" } elseif (-not [string]::IsNullOrWhiteSpace("$(Get-StateProperty -State $existingState -Name 'version')")) { "$(Get-StateProperty -State $existingState -Name 'version')" } else { $null })
+            SupportRoot  = $packSupportRoot
+            ManifestPath = $manifestPath
+            Manifest     = $manifest
+            ArchivePath  = Resolve-WorkflowPackArchivePath -ExistingState $existingState -Manifest $manifest -SupportRoot $packSupportRoot
+            ExistingState = $existingState
+        }) | Out-Null
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($workflowPackRoot) -and (Test-Path -LiteralPath $workflowPackRoot)) {
+        foreach ($supportDirectory in @(Get-ChildItem -LiteralPath $workflowPackRoot -Directory -ErrorAction SilentlyContinue)) {
+            $manifestPath = Join-Path $supportDirectory.FullName "pack-manifest.json"
+            if (-not (Test-Path -LiteralPath $manifestPath)) {
+                continue
+            }
+
+            $manifest = Read-JsonFileSafe -Path $manifestPath
+            $packId = if ($manifest -and -not [string]::IsNullOrWhiteSpace("$($manifest.packId)")) { "$($manifest.packId)" } else { "$($supportDirectory.Name)" }
+            if ([string]::IsNullOrWhiteSpace($packId)) {
+                continue
+            }
+            if (@($seenPackIds | Where-Object { $_ -ieq $packId }).Count -gt 0) {
+                continue
+            }
+
+            Add-UniqueString -List $seenPackIds -Value $packId
+            $resolved.Add([pscustomobject]@{
+                PackId       = $packId
+                DisplayName  = $(if ($manifest -and -not [string]::IsNullOrWhiteSpace("$($manifest.displayName)")) { "$($manifest.displayName)" } else { $packId })
+                PluginId     = $(if ($manifest -and -not [string]::IsNullOrWhiteSpace("$($manifest.pluginId)")) { "$($manifest.pluginId)" } else { $packId })
+                Version      = $(if ($manifest -and -not [string]::IsNullOrWhiteSpace("$($manifest.version)")) { "$($manifest.version)" } else { $null })
+                SupportRoot  = $supportDirectory.FullName
+                ManifestPath = $manifestPath
+                Manifest     = $manifest
+                ArchivePath  = Resolve-WorkflowPackArchivePath -ExistingState $null -Manifest $manifest -SupportRoot $supportDirectory.FullName
+                ExistingState = $null
+            }) | Out-Null
+        }
+    }
+
+    return @($resolved.ToArray())
+}
+
+function Invoke-WorkflowPackVerification {
+    param([object]$WorkflowPack)
+
+    if ([string]::IsNullOrWhiteSpace("$($WorkflowPack.PluginId)")) {
+        return [pscustomobject]@{
+            Success = $false
+            Summary = "Workflow pack plugin id is missing."
+            Checks  = @(
+                [pscustomobject]@{
+                    name      = "plugin id"
+                    exitCode  = 1
+                    timedOut  = $false
+                    summary   = "Workflow pack plugin id is missing."
+                    arguments = @()
+                }
+            )
+        }
+    }
+
+    $checks = New-Object System.Collections.Generic.List[object]
+    foreach ($check in @(
+        [pscustomobject]@{ Name = "Plugin info"; Arguments = @("plugins", "info", "$($WorkflowPack.PluginId)"); TimeoutSeconds = 45 },
+        [pscustomobject]@{ Name = "Plugins doctor"; Arguments = @("plugins", "doctor"); TimeoutSeconds = 120 },
+        [pscustomobject]@{ Name = "Skills check"; Arguments = @("skills", "check"); TimeoutSeconds = 120 }
+    )) {
+        $result = Invoke-OpenClaw -Arguments $check.Arguments -TimeoutSeconds $check.TimeoutSeconds
+        $checks.Add([pscustomobject]@{
+            name      = $check.Name
+            exitCode  = $result.ExitCode
+            timedOut  = [bool]$result.TimedOut
+            summary   = Get-CommandResultSummary -Result $result
+            arguments = @($check.Arguments)
+        }) | Out-Null
+    }
+
+    $failedChecks = @($checks | Where-Object { $_.timedOut -or $_.exitCode -ne 0 })
+    $summary = if ($failedChecks.Count -gt 0) {
+        "$($failedChecks[0].name): $($failedChecks[0].summary)"
+    } else {
+        "Workflow pack verification passed."
+    }
+
+    return [pscustomobject]@{
+        Success = ($failedChecks.Count -eq 0)
+        Summary = $summary
+        Checks  = $checks.ToArray()
+    }
+}
+
+function Invoke-WorkflowPackSelfHeal {
+    param([object]$WorkflowPack)
+
+    if ([string]::IsNullOrWhiteSpace("$($WorkflowPack.ArchivePath)") -or -not (Test-Path -LiteralPath "$($WorkflowPack.ArchivePath)")) {
+        return [pscustomobject]@{
+            Attempted    = $false
+            Success      = $false
+            Summary      = "Workflow pack support archive is missing."
+            Actions      = @()
+            AttemptedAt  = $null
+            ArchiveMissing = $true
+        }
+    }
+
+    Write-UiStatus -Level "warn" -Message ("Workflow add-on '{0}' looks unhealthy. Reinstalling it from the local support archive..." -f $WorkflowPack.DisplayName)
+    Write-Log -Level "WARN" -Message ("Workflow pack '{0}' failed verification. Reinstalling from support archive: {1}" -f $WorkflowPack.PackId, $WorkflowPack.ArchivePath)
+
+    $actions = New-Object System.Collections.Generic.List[object]
+    $attemptedAt = (Get-Date).ToString("o")
+    foreach ($action in @(
+        [pscustomobject]@{ Name = "Install plugin pack"; Arguments = @("plugins", "install", "$($WorkflowPack.ArchivePath)"); TimeoutSeconds = 180; Enabled = $true },
+        [pscustomobject]@{ Name = "Enable plugin pack"; Arguments = @("plugins", "enable", "$($WorkflowPack.PluginId)"); TimeoutSeconds = 45; Enabled = (-not [string]::IsNullOrWhiteSpace("$($WorkflowPack.PluginId)")) }
+    )) {
+        if (-not $action.Enabled) {
+            continue
+        }
+
+        $result = Invoke-OpenClaw -Arguments $action.Arguments -TimeoutSeconds $action.TimeoutSeconds
+        $actions.Add([pscustomobject]@{
+            name      = $action.Name
+            exitCode  = $result.ExitCode
+            timedOut  = [bool]$result.TimedOut
+            summary   = Get-CommandResultSummary -Result $result
+            arguments = @($action.Arguments)
+        }) | Out-Null
+    }
+
+    $failedActions = @($actions | Where-Object { $_.timedOut -or $_.exitCode -ne 0 })
+    return [pscustomobject]@{
+        Attempted      = $true
+        Success        = ($failedActions.Count -eq 0)
+        Summary        = $(if ($failedActions.Count -gt 0) { "$($failedActions[0].name): $($failedActions[0].summary)" } else { "Workflow pack reinstall commands completed." })
+        Actions        = $actions.ToArray()
+        AttemptedAt    = $attemptedAt
+        ArchiveMissing = $false
+    }
+}
+
+function New-WorkflowPackStateSnapshot {
+    param(
+        [object]$WorkflowPack,
+        [object]$Verification,
+        [object]$Repair
+    )
+
+    $payload = Convert-StateLikeToOrderedMap -InputObject $WorkflowPack.ExistingState
+    $existingInstalledAt = Get-StateProperty -State $WorkflowPack.ExistingState -Name "installedAt"
+    $installedAt = if (-not [string]::IsNullOrWhiteSpace("$existingInstalledAt")) {
+        "$existingInstalledAt"
+    } else {
+        (Get-Date).ToString("o")
+    }
+
+    $payload.packId = $WorkflowPack.PackId
+    $payload.displayName = $WorkflowPack.DisplayName
+    $payload.version = $WorkflowPack.Version
+    $payload.pluginId = $WorkflowPack.PluginId
+    $payload.archivePath = $WorkflowPack.ArchivePath
+    $payload.manifestPath = $WorkflowPack.ManifestPath
+    $payload.supportRoot = $WorkflowPack.SupportRoot
+    $payload.installed = [bool]$Verification.Success
+    $payload.installedAt = $installedAt
+    $payload.verifiedAt = (Get-Date).ToString("o")
+    $payload.verification = @($Verification.Checks)
+    $payload.lastVerification = [pscustomobject]@{
+        success = [bool]$Verification.Success
+        summary = $Verification.Summary
+        checks  = @($Verification.Checks)
+    }
+    $payload.lastRepair = [pscustomobject]@{
+        attempted      = [bool]$Repair.Attempted
+        success        = [bool]$Repair.Success
+        summary        = $Repair.Summary
+        actions        = @($Repair.Actions)
+        attemptedAt    = $Repair.AttemptedAt
+        archiveMissing = [bool]$Repair.ArchiveMissing
+    }
+
+    return ([pscustomobject]$payload)
+}
+
+function Invoke-WorkflowPackMaintenance {
+    $state = Resolve-InstallState
+    $workflowPacks = @(Resolve-InstalledWorkflowPacks -State $state)
+    $persistedMap = Convert-StateLikeToOrderedMap -InputObject (Get-StateProperty -State $state -Name "workflowPacks")
+
+    if ($workflowPacks.Count -eq 0) {
+        return [pscustomobject]@{
+            Success      = $true
+            CheckedCount = 0
+            RepairedCount = 0
+            WorkflowPacks = $(if ($persistedMap.Count -gt 0) { [pscustomobject]$persistedMap } else { [pscustomobject]@{} })
+            Message      = $null
+            Reason       = $null
+            Summary      = "No workflow packs are currently installed."
+            NextAction   = $null
+            RecoveryCommand = $null
+        }
+    }
+
+    $failedPacks = New-Object System.Collections.Generic.List[object]
+    $repairedCount = 0
+
+    foreach ($workflowPack in @($workflowPacks)) {
+        Write-UiStatus -Level "info" -Message ("Verifying installed workflow add-on '{0}'..." -f $workflowPack.DisplayName)
+        Write-Log -Level "INFO" -Message ("Verifying workflow pack '{0}' (pluginId={1})." -f $workflowPack.PackId, $workflowPack.PluginId)
+
+        $initialVerification = Invoke-WorkflowPackVerification -WorkflowPack $workflowPack
+        $finalVerification = $initialVerification
+        $repair = [pscustomobject]@{
+            Attempted      = $false
+            Success        = $true
+            Summary        = "Workflow pack verification passed without repair."
+            Actions        = @()
+            AttemptedAt    = $null
+            ArchiveMissing = $false
+        }
+
+        if (-not $initialVerification.Success) {
+            $repair = Invoke-WorkflowPackSelfHeal -WorkflowPack $workflowPack
+            if ($repair.Attempted) {
+                $finalVerification = Invoke-WorkflowPackVerification -WorkflowPack $workflowPack
+            }
+        }
+
+        if ($repair.Attempted -and $finalVerification.Success) {
+            $repairedCount += 1
+        }
+
+        $packState = New-WorkflowPackStateSnapshot -WorkflowPack $workflowPack -Verification $finalVerification -Repair $repair
+        $persistedMap[$workflowPack.PackId] = $packState
+
+        if (-not $finalVerification.Success) {
+            $failedPacks.Add([pscustomobject]@{
+                PackId         = $workflowPack.PackId
+                DisplayName    = $workflowPack.DisplayName
+                ArchivePath    = $workflowPack.ArchivePath
+                ArchiveMissing = [bool]$repair.ArchiveMissing
+                Summary        = $finalVerification.Summary
+            }) | Out-Null
+        }
+    }
+
+    $workflowPackState = if ($persistedMap.Count -gt 0) { [pscustomobject]$persistedMap } else { [pscustomobject]@{} }
+    if ($failedPacks.Count -gt 0) {
+        $failedList = $failedPacks.ToArray()
+        $failedNames = @($failedList | ForEach-Object { $_.DisplayName })
+        $archiveMissingFailures = @($failedList | Where-Object { $_.ArchiveMissing })
+        $firstFailure = $failedList[0]
+        $summaryPrefix = if ($failedNames.Count -eq 1) {
+            "Workflow add-on '$($failedNames[0])' could not be verified after Update/Repair."
+        } else {
+            "Some installed workflow add-ons could not be verified after Update/Repair: $($failedNames -join ', ')."
+        }
+
+        return [pscustomobject]@{
+            Success         = $false
+            CheckedCount    = $workflowPacks.Count
+            RepairedCount   = $repairedCount
+            WorkflowPacks   = $workflowPackState
+            Message         = "Installed workflow add-ons still need attention."
+            Reason          = "workflow_pack_repair_failed"
+            Summary         = ("{0} {1}" -f $summaryPrefix, $firstFailure.Summary).Trim()
+            NextAction      = $(if ($archiveMissingFailures.Count -gt 0) { "Download and rerun the matching workflow add-on installer." } else { "Rerun the matching workflow add-on installer to restore the missing workflow package." })
+            RecoveryCommand = $(if (-not [string]::IsNullOrWhiteSpace("$($firstFailure.ArchivePath)")) { 'openclaw plugins install "{0}"' -f $firstFailure.ArchivePath } else { $null })
+        }
+    }
+
+    return [pscustomobject]@{
+        Success         = $true
+        CheckedCount    = $workflowPacks.Count
+        RepairedCount   = $repairedCount
+        WorkflowPacks   = $workflowPackState
+        Message         = $null
+        Reason          = $null
+        Summary         = $(if ($repairedCount -gt 0) { "Installed workflow add-ons were revalidated and self-healed where needed." } else { "Installed workflow add-ons were revalidated." })
+        NextAction      = $null
+        RecoveryCommand = $null
+    }
+}
+
 function Resolve-LastHealthStateForExitCode {
     param([int]$Code)
 
@@ -3624,6 +4035,21 @@ function Finalize-OperationalReadiness {
         }))
     }
 
+    $workflowPackResult = $null
+    if ($script:Context.Mode -in @("Update", "Repair")) {
+        $workflowPackResult = Invoke-WorkflowPackMaintenance
+        if (-not $workflowPackResult.Success) {
+            return (Complete-Maintenance -Code $script:ExitCodes.NeedsAttention -Message $workflowPackResult.Message -Reason $workflowPackResult.Reason -Summary $workflowPackResult.Summary -NextAction $workflowPackResult.NextAction -RecoveryCommand $workflowPackResult.RecoveryCommand -InstalledVersion $InstalledVersion -StateUpdates ([ordered]@{
+                gatewayTokenState = $gatewayTokenState.State
+                providerAuthState = $providerAuth.State
+                workflowPacks     = $workflowPackResult.WorkflowPacks
+                lastStartReason   = $workflowPackResult.Reason
+                lastDashboardMode = $dashboardMode
+                startMode         = $normalizedStartMode
+            }))
+        }
+    }
+
     $message = $SuccessMessage
     if ([string]::IsNullOrWhiteSpace($message)) {
         $message = Get-DefaultResultMessage -Code $SuccessCode
@@ -3662,9 +4088,14 @@ function Finalize-OperationalReadiness {
         $summary = "Gateway is healthy and the dashboard was opened, but provider auth classification timed out or remained inconclusive."
     }
 
+    if ($null -ne $workflowPackResult -and $workflowPackResult.CheckedCount -gt 0) {
+        $summary = ("{0}. {1}" -f $summary.TrimEnd("."), $workflowPackResult.Summary).Trim()
+    }
+
     return (Complete-Maintenance -Code $SuccessCode -Message $message -Reason $finalReason -Summary $summary -InstalledVersion $InstalledVersion -MarkHealthy -HealthState "healthy" -StateUpdates ([ordered]@{
         gatewayTokenState = $gatewayTokenState.State
         providerAuthState = $providerAuth.State
+        workflowPacks     = $(if ($null -ne $workflowPackResult) { $workflowPackResult.WorkflowPacks } else { (Get-StateProperty -State (Resolve-InstallState) -Name "workflowPacks") })
         lastStartReason   = $finalReason
         lastDashboardMode = $dashboardMode
         startMode         = $normalizedStartMode
