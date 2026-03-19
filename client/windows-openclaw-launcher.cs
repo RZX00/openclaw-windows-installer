@@ -1698,6 +1698,17 @@ internal static class Program
                 case "Gateway could not be stabilized.": return "Gateway 未能稳定进入可用状态。";
                 case "The wrapper tried to repair and start the Gateway, but it still did not satisfy persistence and health requirements.": return "已尝试修复并拉起 Gateway，但仍未满足持久化与健康要求。";
                 case "Run Repair first. If it still fails, run Update or reinstall.": return "请先运行一键修复；若仍失败，再执行一键更新或重新安装。";
+                case "Gateway needs setup.": return "Gateway 需要先完成初始化配置。";
+                case "Detected first-run or missing Gateway configuration.": return "检测到首次运行或 Gateway 配置缺失。";
+                case "Run openclaw setup first.": return "请先运行 openclaw setup 完成初始化。";
+                case "The Gateway port is already in use.": return "Gateway 端口已被占用。";
+                case "The Gateway port is already in use by another process.": return "Gateway 端口已被其他进程占用。";
+                case "The Gateway lock is blocking startup.": return "Gateway 锁阻止了当前启动。";
+                case "The Gateway lock is still held by another process or a stale instance.": return "Gateway 锁仍被其他进程或残留实例占用。";
+                case "Run openclaw gateway stop, then try Start again.": return "请先运行 openclaw gateway stop 清理进程，然后再重试一键启动。";
+                case "The Gateway hit a Windows path error.": return "Gateway 遇到了 Windows 路径错误。";
+                case "A Windows path encoding or permission error prevented the Gateway from creating its workspace.": return "Windows 路径编码或权限错误阻止了 Gateway 创建工作区。";
+                case "The wrapper now forces HOME/USERPROFILE to os.homedir(). If it still fails, verify the outer terminal environment and rerun Start.": return "当前 wrapper 已强制把 HOME/USERPROFILE 指向 os.homedir()；若仍失败，请检查外层终端环境后重新运行一键启动。";
                 case "A persistent OpenClaw console window was opened to keep the Gateway online.": return "已打开持久运行窗口，并正在通过该窗口维持 Gateway 在线。";
                 case "Gateway is already available on this host. Continuing to open the dashboard.": return "Gateway 已在本机可用，正在继续打开 Dashboard。";
                 case "Gateway was restored to a usable state. Continuing to open the dashboard.": return "Gateway 已恢复到可用状态，正在继续打开 Dashboard。";

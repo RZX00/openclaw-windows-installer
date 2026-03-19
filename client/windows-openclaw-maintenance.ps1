@@ -885,6 +885,136 @@ function Invoke-CmdFileCapture {
     }
 }
 
+function Clear-GatewayStartupFailureState {
+    $script:GatewayStartupFailure = $null
+}
+
+function Remove-AnsiEscapeSequences {
+    param([string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return ""
+    }
+
+    $escapePrefix = [string][char]27
+    return ([regex]::Replace($Text, ($escapePrefix + '\[[0-9;?]*[ -/]*[@-~]'), "")).Trim()
+}
+
+function Classify-GatewayStartupFailure {
+    param(
+        [string[]]$Lines,
+        [string[]]$Arguments = @()
+    )
+
+    $normalizedLines = @($Lines | ForEach-Object { Remove-AnsiEscapeSequences -Text "$_" } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($normalizedLines.Count -eq 0) {
+        return $null
+    }
+
+    $joined = ($normalizedLines -join "`n").Trim()
+    $lower = $joined.ToLowerInvariant()
+
+    if ($lower -match "missing config|gateway\.mode=local|allow-unconfigured|first-run or missing gateway configuration") {
+        return [pscustomobject]@{
+            Message         = "Gateway needs setup."
+            Reason          = "gateway_unconfigured"
+            Summary         = "Detected first-run or missing Gateway configuration."
+            NextAction      = "Run openclaw setup first."
+            RecoveryCommand = "openclaw setup"
+        }
+    }
+
+    if ($lower -match "eaddrinuse|address already in use|already listening on ws://|gateway port is already in use by another process") {
+        return [pscustomobject]@{
+            Message         = "The Gateway port is already in use."
+            Reason          = "gateway_port_in_use"
+            Summary         = "The Gateway port is already in use by another process."
+            NextAction      = "Run openclaw gateway stop, then try Start again."
+            RecoveryCommand = "openclaw gateway stop"
+        }
+    }
+
+    if ($lower -match "failed to acquire gateway lock|gateway already running|lock timeout|gateway lock is still held by another process or a stale instance") {
+        return [pscustomobject]@{
+            Message         = "The Gateway lock is blocking startup."
+            Reason          = "gateway_lock_conflict"
+            Summary         = "The Gateway lock is still held by another process or a stale instance."
+            NextAction      = "Run openclaw gateway stop, then try Start again."
+            RecoveryCommand = "openclaw gateway stop"
+        }
+    }
+
+    if (($lower -match "eperm|operation not permitted|windows path encoding or permission error") -and ($lower -match "mkdir|directory|workspace|userprofile|home|path")) {
+        return [pscustomobject]@{
+            Message         = "The Gateway hit a Windows path error."
+            Reason          = "gateway_path_encoding_error"
+            Summary         = "A Windows path encoding or permission error prevented the Gateway from creating its workspace."
+            NextAction      = "The wrapper now forces HOME/USERPROFILE to os.homedir(). If it still fails, verify the outer terminal environment and rerun Start."
+            RecoveryCommand = $null
+        }
+    }
+
+    return $null
+}
+
+function Update-GatewayStartupFailureState {
+    param(
+        [string[]]$Arguments,
+        [object]$Result
+    )
+
+    if ($null -eq $Result -or $Arguments.Count -lt 2) {
+        return
+    }
+
+    if ("$($Arguments[0])" -ne "gateway") {
+        return
+    }
+
+    $gatewayAction = "$($Arguments[1])".ToLowerInvariant()
+    if ($gatewayAction -notin @("start", "restart", "run", "install")) {
+        return
+    }
+
+    if (-not $Result.TimedOut -and $Result.ExitCode -eq 0) {
+        Clear-GatewayStartupFailureState
+        return
+    }
+
+    $classified = Classify-GatewayStartupFailure -Lines @($Result.Output) -Arguments $Arguments
+    if ($null -ne $classified) {
+        $script:GatewayStartupFailure = $classified
+    }
+}
+
+function Resolve-GatewayStartupFailureOrDefault {
+    param(
+        [string]$FallbackMessage,
+        [string]$FallbackReason,
+        [string]$FallbackSummary,
+        [string]$FallbackNextAction,
+        [string]$FallbackRecoveryCommand = $null
+    )
+
+    if ($null -ne $script:GatewayStartupFailure) {
+        return [pscustomobject]@{
+            Message         = $script:GatewayStartupFailure.Message
+            Reason          = $script:GatewayStartupFailure.Reason
+            Summary         = $script:GatewayStartupFailure.Summary
+            NextAction      = $script:GatewayStartupFailure.NextAction
+            RecoveryCommand = $script:GatewayStartupFailure.RecoveryCommand
+        }
+    }
+
+    return [pscustomobject]@{
+        Message         = $FallbackMessage
+        Reason          = $FallbackReason
+        Summary         = $FallbackSummary
+        NextAction      = $FallbackNextAction
+        RecoveryCommand = $FallbackRecoveryCommand
+    }
+}
+
 function Get-DefaultInstallState {
     return [ordered]@{
         schemaVersion             = 1
@@ -2595,7 +2725,9 @@ function Invoke-OpenClaw {
     }
 
     Write-Log -Level "INFO" -Message ("Executing openclaw {0}" -f ($Arguments -join " "))
-    return Invoke-CmdFileCapture -FilePath $wrapperPath -Arguments $Arguments -TimeoutSeconds $TimeoutSeconds
+    $result = Invoke-CmdFileCapture -FilePath $wrapperPath -Arguments $Arguments -TimeoutSeconds $TimeoutSeconds
+    Update-GatewayStartupFailureState -Arguments $Arguments -Result $result
+    return $result
 }
 
 function Test-OpenClawCommandSupport {
@@ -4900,6 +5032,7 @@ function Invoke-InstallerUpdate {
 function Invoke-StartMode {
     $installState = Resolve-InstallState
     $startMode = Get-NormalizedStartMode -Value (Get-StateProperty -State $installState -Name "startMode" -Default "local-stable")
+    Clear-GatewayStartupFailureState
 
     if (Test-LicenseGateEnabled) {
         Write-UiPhase -Key "start.license" -Title "Checking the license" -Progress 5 -Message "Checking the local authorization state..."
@@ -4950,10 +5083,11 @@ function Invoke-StartMode {
         Write-UiPhase -Key "start.restart" -Title "Starting or restarting the Gateway" -Progress 65 -Message "Trying to start or restart the Gateway..."
         $readyResult = Ensure-PersistentGatewayReady -AllowConsoleFallback
         if (-not $readyResult.Ready) {
-            return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired -Message "Gateway could not be stabilized." -Reason "gateway_persistence_failed" -Summary "The wrapper tried to repair and start the Gateway, but it still did not satisfy persistence and health requirements." -NextAction "Run Repair first. If it still fails, run Update or reinstall." -RecoveryCommand "openclaw gateway status --json --require-rpc" -InstalledVersion $installedVersion.NormalizedVersion -StateUpdates ([ordered]@{
+            $gatewayFailure = Resolve-GatewayStartupFailureOrDefault -FallbackMessage "Gateway could not be stabilized." -FallbackReason "gateway_persistence_failed" -FallbackSummary "The wrapper tried to repair and start the Gateway, but it still did not satisfy persistence and health requirements." -FallbackNextAction "Run Repair first. If it still fails, run Update or reinstall." -FallbackRecoveryCommand "openclaw gateway status --json --require-rpc"
+            return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired -Message $gatewayFailure.Message -Reason $gatewayFailure.Reason -Summary $gatewayFailure.Summary -NextAction $gatewayFailure.NextAction -RecoveryCommand $gatewayFailure.RecoveryCommand -InstalledVersion $installedVersion.NormalizedVersion -StateUpdates ([ordered]@{
                 gatewayTokenState = $gatewayTokenPreflight.State
                 providerAuthState = [pscustomobject](Convert-ProviderAuthState -InputObject $null)
-                lastStartReason   = "gateway_persistence_failed"
+                lastStartReason   = $gatewayFailure.Reason
                 lastDashboardMode = "none"
                 startMode         = $startMode
             }))
@@ -4984,6 +5118,7 @@ function Invoke-StartMode {
 function Invoke-UpdateMode {
     $installState = Resolve-InstallState
     $startMode = Get-NormalizedStartMode -Value (Get-StateProperty -State $installState -Name "startMode" -Default "local-stable")
+    Clear-GatewayStartupFailureState
 
     if (Test-LicenseGateEnabled) {
         Write-UiPhase -Key "update.license" -Title "Checking the license" -Progress 3 -Message "Checking the local authorization state..."
@@ -5025,8 +5160,9 @@ function Invoke-UpdateMode {
             return (Finalize-OperationalReadiness -InstalledVersion $currentVersion.NormalizedVersion -StartMode $startMode -SuccessCode $script:ExitCodes.NoChanges -SuccessMessage $(if ($readyResult.UsedConsoleFallback) { "OpenClaw is already up to date, and a persistent console window was opened." } else { "OpenClaw is already up to date, and post-update health verification passed." }) -SuccessReason "update_no_changes_verified" -SuccessSummary "Update verified that the current version is already latest and that the Gateway and dashboard post-checks passed.")
         }
 
-        return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired -Message "The current version is already latest, but the Gateway post-check failed." -Reason "update_no_changes_unhealthy" -Summary "No new version was needed, but the current installation still is not stable." -NextAction "Run Repair first." -RecoveryCommand "openclaw gateway status --json --require-rpc" -InstalledVersion $currentVersion.NormalizedVersion -StateUpdates ([ordered]@{
-            lastStartReason   = "update_no_changes_unhealthy"
+        $gatewayFailure = Resolve-GatewayStartupFailureOrDefault -FallbackMessage "The current version is already latest, but the Gateway post-check failed." -FallbackReason "update_no_changes_unhealthy" -FallbackSummary "No new version was needed, but the current installation still is not stable." -FallbackNextAction "Run Repair first." -FallbackRecoveryCommand "openclaw gateway status --json --require-rpc"
+        return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired -Message $gatewayFailure.Message -Reason $gatewayFailure.Reason -Summary $gatewayFailure.Summary -NextAction $gatewayFailure.NextAction -RecoveryCommand $gatewayFailure.RecoveryCommand -InstalledVersion $currentVersion.NormalizedVersion -StateUpdates ([ordered]@{
+            lastStartReason   = $gatewayFailure.Reason
             lastDashboardMode = "none"
             startMode         = $startMode
         }))
@@ -5059,8 +5195,9 @@ function Invoke-UpdateMode {
     $readyResult = Ensure-PersistentGatewayReady -AllowConsoleFallback
     if (-not $readyResult.Ready) {
         Write-Log -Level "ERROR" -Message "Gateway persistence and health verification failed after update."
-        return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired -Message "The update finished, but the Gateway did not return to a stable state." -Reason "update_post_restart_unhealthy" -Summary "The update completed, but Gateway persistence/RPC post-checks failed." -NextAction "Run Repair first. Reinstall only if Repair still fails." -RecoveryCommand "openclaw gateway status --json --require-rpc" -InstalledVersion $installedVersion.NormalizedVersion -StateUpdates ([ordered]@{
-            lastStartReason   = "update_post_restart_unhealthy"
+        $gatewayFailure = Resolve-GatewayStartupFailureOrDefault -FallbackMessage "The update finished, but the Gateway did not return to a stable state." -FallbackReason "update_post_restart_unhealthy" -FallbackSummary "The update completed, but Gateway persistence/RPC post-checks failed." -FallbackNextAction "Run Repair first. Reinstall only if Repair still fails." -FallbackRecoveryCommand "openclaw gateway status --json --require-rpc"
+        return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired -Message $gatewayFailure.Message -Reason $gatewayFailure.Reason -Summary $gatewayFailure.Summary -NextAction $gatewayFailure.NextAction -RecoveryCommand $gatewayFailure.RecoveryCommand -InstalledVersion $installedVersion.NormalizedVersion -StateUpdates ([ordered]@{
+            lastStartReason   = $gatewayFailure.Reason
             lastDashboardMode = "none"
             startMode         = $startMode
         }))
@@ -5073,6 +5210,7 @@ function Invoke-UpdateMode {
 function Invoke-RepairMode {
     $installState = Resolve-InstallState
     $startMode = Get-NormalizedStartMode -Value (Get-StateProperty -State $installState -Name "startMode" -Default "local-stable")
+    Clear-GatewayStartupFailureState
 
     if (Test-LicenseGateEnabled) {
         Write-UiPhase -Key "repair.license" -Title "Checking the license" -Progress 5 -Message "Checking the local authorization state..."
@@ -5145,8 +5283,9 @@ function Invoke-RepairMode {
         return (Finalize-OperationalReadiness -InstalledVersion $installedVersion.NormalizedVersion -StartMode $startMode -SuccessCode $script:ExitCodes.Success -SuccessMessage $(if ($readyResult.UsedConsoleFallback) { "Gateway service rewrite finished, and a persistent OpenClaw console window was opened." } else { "Gateway service rewrite finished, and the Gateway/dashboard post-checks passed." }) -SuccessReason "repair_gateway_rewrite_completed" -SuccessSummary "The unified post-validation passed after the Gateway service rewrite.")
     }
 
-    return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired -Message "Repair exhausted its fallback steps, but the installation is still unstable." -Reason "repair_exhausted" -Summary "Restart, Doctor, and service rewrite still did not restore a stable state." -NextAction "Run Update first. Reinstall only if Update still fails." -RecoveryCommand "openclaw gateway status --json --require-rpc" -InstalledVersion $installedVersion.NormalizedVersion -StateUpdates ([ordered]@{
-        lastStartReason   = "repair_exhausted"
+    $gatewayFailure = Resolve-GatewayStartupFailureOrDefault -FallbackMessage "Repair exhausted its fallback steps, but the installation is still unstable." -FallbackReason "repair_exhausted" -FallbackSummary "Restart, Doctor, and service rewrite still did not restore a stable state." -FallbackNextAction "Run Update first. Reinstall only if Update still fails." -FallbackRecoveryCommand "openclaw gateway status --json --require-rpc"
+    return (Complete-Maintenance -Code $script:ExitCodes.ReinstallRequired -Message $gatewayFailure.Message -Reason $gatewayFailure.Reason -Summary $gatewayFailure.Summary -NextAction $gatewayFailure.NextAction -RecoveryCommand $gatewayFailure.RecoveryCommand -InstalledVersion $installedVersion.NormalizedVersion -StateUpdates ([ordered]@{
+        lastStartReason   = $gatewayFailure.Reason
         lastDashboardMode = "none"
         startMode         = $startMode
     }))
