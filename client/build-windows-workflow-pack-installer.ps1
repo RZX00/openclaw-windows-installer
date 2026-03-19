@@ -9,7 +9,8 @@ param(
     [string]$OutputName,
     [string]$NodeVersion = "22.22.1",
     [string]$GitHubCliVersion = "2.88.1",
-    [string]$MinGitVersion = "2.53.0.2",
+    [Alias("MinGitVersion")]
+    [string]$GitForWindowsVersion = "2.53.0.2",
     [string]$PythonVersion = "3.12.10",
     [string]$AgentReachTag = "v1.3.0",
     [string]$XreachVersion = "0.3.3",
@@ -195,6 +196,27 @@ function Expand-ArchiveFlatten {
     Remove-Item -LiteralPath $extractRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+function Expand-PortableGitArchive {
+    param(
+        [string]$ArchivePath,
+        [string]$Destination
+    )
+
+    Ensure-Directory -Path $Destination
+    if ($DryRun) {
+        return
+    }
+
+    $process = Start-Process -FilePath $ArchivePath `
+        -ArgumentList @("-y", ("-o{0}" -f $Destination)) `
+        -PassThru `
+        -Wait `
+        -WindowStyle Hidden
+    if ($process.ExitCode -ne 0) {
+        Write-Err ("PortableGit extraction failed with exit code {0}: {1}" -f $process.ExitCode, $ArchivePath)
+    }
+}
+
 function New-DirectoryZipArchive {
     param(
         [string]$SourceDir,
@@ -335,12 +357,12 @@ function Invoke-External {
     }
 }
 
-function Get-MinGitReleaseTag {
+function Get-GitForWindowsReleaseTag {
     param([string]$Version)
 
     $match = [regex]::Match($Version, '^(?<base>\d+\.\d+\.\d+)\.(?<patch>\d+)$')
     if (-not $match.Success) {
-        Write-Err ("MinGit version is not in the expected format: {0}" -f $Version)
+        Write-Err ("Git for Windows version is not in the expected format: {0}" -f $Version)
     }
 
     return ("v{0}.windows.{1}" -f $match.Groups["base"].Value, $match.Groups["patch"].Value)
@@ -353,7 +375,7 @@ function Get-ArchitectureDescriptor {
                 GhArch = "amd64"
                 PyArch = "amd64"
                 NodeArch = "x64"
-                MinGitFile = ("MinGit-{0}-64-bit.zip" -f $MinGitVersion)
+                PortableGitFile = ("PortableGit-{0}-64-bit.7z.exe" -f $GitForWindowsVersion)
             }
         }
         "arm64" {
@@ -361,7 +383,7 @@ function Get-ArchitectureDescriptor {
                 GhArch = "arm64"
                 PyArch = "arm64"
                 NodeArch = "arm64"
-                MinGitFile = ("MinGit-{0}-arm64.zip" -f $MinGitVersion)
+                PortableGitFile = ("PortableGit-{0}-arm64.7z.exe" -f $GitForWindowsVersion)
             }
         }
     }
@@ -470,12 +492,12 @@ function Prepare-PortableGit {
     )
 
     $arch = Get-ArchitectureDescriptor
-    $releaseTag = Get-MinGitReleaseTag -Version $MinGitVersion
-    $downloadPath = Join-Path $DownloadDir $arch.MinGitFile
-    $url = "https://github.com/git-for-windows/git/releases/download/{0}/{1}" -f $releaseTag, $arch.MinGitFile
+    $releaseTag = Get-GitForWindowsReleaseTag -Version $GitForWindowsVersion
+    $downloadPath = Join-Path $DownloadDir $arch.PortableGitFile
+    $url = "https://github.com/git-for-windows/git/releases/download/{0}/{1}" -f $releaseTag, $arch.PortableGitFile
 
     Download-File -Url $url -Destination $downloadPath
-    Expand-ArchiveFlatten -ZipPath $downloadPath -Destination $DestinationRoot
+    Expand-PortableGitArchive -ArchivePath $downloadPath -Destination $DestinationRoot
 
     if (-not $DryRun) {
         $gitExe = Get-FirstExistingPath -Candidates @(
@@ -486,6 +508,15 @@ function Prepare-PortableGit {
         )
         if (-not $gitExe) {
             Write-Err ("Portable Git did not contain git.exe: {0}" -f $DestinationRoot)
+        }
+
+        $bashExe = Get-FirstExistingPath -Candidates @(
+            (Join-Path $DestinationRoot "bin\bash.exe"),
+            (Join-Path $DestinationRoot "usr\bin\bash.exe"),
+            (Join-Path $DestinationRoot "git-bash.exe")
+        )
+        if (-not $bashExe) {
+            Write-Err ("Portable Git did not contain bash.exe: {0}" -f $DestinationRoot)
         }
     }
 }
@@ -729,7 +760,8 @@ function Prepare-WorkflowRuntime {
         pythonVersion = $(if (Runtime-RequiresAgentReachPython -RuntimeSpec $RuntimeSpec) { $PythonVersion } else { $null })
         nodeVersion = $NodeVersion
         gitHubCliVersion = $GitHubCliVersion
-        minGitVersion = $MinGitVersion
+        gitForWindowsFlavor = "PortableGit"
+        gitForWindowsVersion = $GitForWindowsVersion
         agentReachTag = $(if (Runtime-RequiresAgentReachPython -RuntimeSpec $RuntimeSpec) { $AgentReachTag } else { $null })
         agentReachVersion = $pythonMetadata.AgentReachVersion
         jqVersion = $(if (Runtime-RequiresJq -RuntimeSpec $RuntimeSpec) { $JqVersion } else { $null })

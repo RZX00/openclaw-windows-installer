@@ -216,8 +216,8 @@
       "id": "clawdefender-shell",
       "type": "command-available",
       "command": "bash",
-      "severity": "warning",
-      "message": "bash must be available for clawdefender script execution."
+      "severity": "error",
+      "message": "bash must be available for clawdefender and agent-reach script execution."
     },
     {
       "id": "agent-browser-operator-setup",

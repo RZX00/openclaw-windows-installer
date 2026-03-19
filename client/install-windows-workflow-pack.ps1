@@ -410,7 +410,7 @@ function Resolve-BashExecutablePath {
         (Join-Path $gitRoot "git-bash.exe")
     )
     if (-not $bashExe) {
-        Write-Err ("Portable bash executable was not found in: {0}" -f $gitRoot)
+        Write-Err ("Portable bash executable was not found in: {0}. Rebuild the pack with a Git-for-Windows payload that includes bash.exe." -f $gitRoot)
     }
     return $bashExe
 }
@@ -597,6 +597,22 @@ function Install-AgentReachRuntime {
     Install-FoundationRuntime
 }
 
+function Runtime-DeclaresCommand {
+    param([string]$CommandName)
+
+    if ([string]::IsNullOrWhiteSpace($CommandName) -or -not $script:Installer.Manifest.runtime) {
+        return $false
+    }
+
+    foreach ($declaredCommand in @(Convert-ToArray -Value (Get-ObjectPropertyValue -Object $script:Installer.Manifest.runtime -Name "commands"))) {
+        if ("$declaredCommand" -ieq $CommandName) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
 function Initialize-Context {
     Assert-Administrator
 
@@ -678,9 +694,19 @@ function Run-Verification {
     Invoke-Probe -Name "Plugin info" -FilePath $script:Installer.OpenClawWrapperPath -Arguments @("plugins", "info", "$($script:Installer.Manifest.pluginId)") -UseCmd
     Invoke-Probe -Name "Plugins doctor" -FilePath $script:Installer.OpenClawWrapperPath -Arguments @("plugins", "doctor") -UseCmd
     Invoke-Probe -Name "Skills check" -FilePath $script:Installer.OpenClawWrapperPath -Arguments @("skills", "check") -UseCmd
+    if (Runtime-DeclaresCommand -CommandName "agent-reach") {
+        $agentReachWrapperPath = Join-Path $script:Installer.BinDir "agent-reach.cmd"
+        if (-not (Test-Path -LiteralPath $agentReachWrapperPath -PathType Leaf)) {
+            Write-Err ("The bundled agent-reach wrapper was not found after runtime installation: {0}" -f $agentReachWrapperPath)
+        }
+        Invoke-Probe -Name "Agent Reach doctor" -FilePath $agentReachWrapperPath -Arguments @("doctor") -UseCmd
+    }
     Assert-ProbeSucceeded -Name "Plugin info"
     Assert-ProbeSucceeded -Name "Plugins doctor"
     Assert-ProbeSucceeded -Name "Skills check"
+    if (Runtime-DeclaresCommand -CommandName "agent-reach") {
+        Assert-ProbeSucceeded -Name "Agent Reach doctor"
+    }
 }
 
 function Resolve-ManagedRootPath {
