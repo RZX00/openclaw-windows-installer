@@ -36,6 +36,10 @@ $script:Installer = [ordered]@{
     RuntimeRoot = $null
     BinDir = $null
     OpenClawWrapperPath = $null
+    UserStateRoot = $null
+    UserConfigPath = $null
+    UserExtensionsRoot = $null
+    BundledExtensionsRoot = $null
     DryRun = $DryRun.IsPresent
     Verification = New-Object System.Collections.Generic.List[object]
     WrapperPaths = New-Object System.Collections.Generic.List[string]
@@ -99,6 +103,25 @@ function Get-ObjectPropertyValue {
     }
 
     return $property.Value
+}
+
+function Remove-ObjectPropertyIfExists {
+    param(
+        [object]$Object,
+        [string]$Name
+    )
+
+    if ($null -eq $Object -or [string]::IsNullOrWhiteSpace($Name)) {
+        return $false
+    }
+
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property) {
+        return $false
+    }
+
+    $Object.PSObject.Properties.Remove($property.Name)
+    return $true
 }
 
 function Get-FileSha256 {
@@ -235,8 +258,9 @@ function Resolve-DefaultOpenClawRoot {
             continue
         }
 
-        $resolvedRoot = if (-not [string]::IsNullOrWhiteSpace("$($state.dataRoot)")) {
-            "$($state.dataRoot)"
+        $dataRoot = Get-ObjectPropertyValue -Object $state -Name "dataRoot"
+        $resolvedRoot = if (-not [string]::IsNullOrWhiteSpace("$dataRoot")) {
+            "$dataRoot"
         } else {
             $candidate
         }
@@ -247,6 +271,53 @@ function Resolve-DefaultOpenClawRoot {
     }
 
     return (Join-Path $env:ProgramData "OpenClaw")
+}
+
+function Resolve-OpenClawUserStateRoot {
+    $candidates = @(
+        $env:OPENCLAW_STATE_DIR,
+        $(if (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) { Join-Path $env:USERPROFILE ".openclaw" } else { $null }),
+        $(if (-not [string]::IsNullOrWhiteSpace($HOME)) { Join-Path $HOME ".openclaw" } else { $null })
+    )
+
+    foreach ($candidate in @($candidates)) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) {
+            continue
+        }
+        if (Test-Path -LiteralPath (Join-Path $candidate "openclaw.json")) {
+            return $candidate
+        }
+    }
+
+    foreach ($candidate in @($candidates)) {
+        if (-not [string]::IsNullOrWhiteSpace($candidate)) {
+            return $candidate
+        }
+    }
+
+    return $null
+}
+
+function Resolve-OpenClawBundledExtensionsRoot {
+    $state = Read-JsonFile -Path (Join-Path $script:Installer.OpenClawRoot "install-state.json")
+    $candidates = @()
+
+    if ($state) {
+        $commandTarget = Get-ObjectPropertyValue -Object $state -Name "commandTarget"
+        $portableNodeDir = Get-ObjectPropertyValue -Object $state -Name "portableNodeDir"
+
+        if (-not [string]::IsNullOrWhiteSpace("$commandTarget")) {
+            $commandTargetParent = Split-Path -Path "$commandTarget" -Parent
+            if (-not [string]::IsNullOrWhiteSpace($commandTargetParent)) {
+                $candidates += (Join-Path $commandTargetParent "extensions")
+            }
+        }
+        if (-not [string]::IsNullOrWhiteSpace("$portableNodeDir")) {
+            $candidates += (Join-Path "$portableNodeDir" "node_modules\openclaw\extensions")
+        }
+    }
+
+    return (Resolve-FirstExistingPath -Candidates $candidates)
 }
 
 function Resolve-PackManifestPathCandidate {
@@ -262,8 +333,9 @@ function Resolve-PackManifestPathCandidate {
 }
 
 function Resolve-PackArchivePathCandidate {
-    $archiveName = if ($script:Installer.Manifest -and -not [string]::IsNullOrWhiteSpace("$($script:Installer.Manifest.archiveName)")) {
-        "$($script:Installer.Manifest.archiveName)"
+    $archiveNameValue = Get-ObjectPropertyValue -Object $script:Installer.Manifest -Name "archiveName"
+    $archiveName = if (-not [string]::IsNullOrWhiteSpace("$archiveNameValue")) {
+        "$archiveNameValue"
     } else {
         $null
     }
@@ -318,6 +390,20 @@ function Quote-CmdArg {
     return '"' + $text.Replace('"', '\"') + '"'
 }
 
+function Add-VerificationEntry {
+    param(
+        [string]$Name,
+        [int]$ExitCode,
+        [string]$Message
+    )
+
+    $script:Installer.Verification.Add([pscustomobject]@{
+        name = $Name
+        exitCode = $ExitCode
+        message = $Message
+    }) | Out-Null
+}
+
 function Invoke-Probe {
     param(
         [string]$Name,
@@ -328,11 +414,7 @@ function Invoke-Probe {
 
     if ($script:Installer.DryRun) {
         Write-Note ("Dry-run probe: {0} {1}" -f $FilePath, ($Arguments -join " "))
-        $script:Installer.Verification.Add([pscustomobject]@{
-            name = $Name
-            exitCode = 0
-            message = "Dry-run"
-        }) | Out-Null
+        Add-VerificationEntry -Name $Name -ExitCode 0 -Message "Dry-run"
         return
     }
 
@@ -347,11 +429,7 @@ function Invoke-Probe {
     $message = @($output | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 1)
     $summary = if ($message.Count -gt 0) { "$($message[0])".Trim() } elseif ($exitCode -eq 0) { "Command completed successfully." } else { "Command returned a non-zero exit code." }
 
-    $script:Installer.Verification.Add([pscustomobject]@{
-        name = $Name
-        exitCode = $exitCode
-        message = $summary
-    }) | Out-Null
+    Add-VerificationEntry -Name $Name -ExitCode $exitCode -Message $summary
 
     if ($exitCode -eq 0) {
         Write-Ok ("{0}: {1}" -f $Name, $summary)
@@ -534,8 +612,9 @@ function Install-FoundationRuntime {
         $script:Installer.RuntimeRoot
     }
     $toolsRoot = Get-WorkflowRuntimeToolsRoot -RuntimeRoot $runtimeInspectionRoot
+    $runtime = Get-ObjectPropertyValue -Object $script:Installer.Manifest -Name "runtime"
     $runtimeCommands = @(
-        @(Convert-ToArray -Value (Get-ObjectPropertyValue -Object $script:Installer.Manifest.runtime -Name "commands")) |
+        @(Convert-ToArray -Value (Get-ObjectPropertyValue -Object $runtime -Name "commands")) |
             ForEach-Object { "$_" }
     )
     $requiredPaths = @(
@@ -600,17 +679,218 @@ function Install-AgentReachRuntime {
 function Runtime-DeclaresCommand {
     param([string]$CommandName)
 
-    if ([string]::IsNullOrWhiteSpace($CommandName) -or -not $script:Installer.Manifest.runtime) {
+    $runtime = Get-ObjectPropertyValue -Object $script:Installer.Manifest -Name "runtime"
+    if ([string]::IsNullOrWhiteSpace($CommandName) -or -not $runtime) {
         return $false
     }
 
-    foreach ($declaredCommand in @(Convert-ToArray -Value (Get-ObjectPropertyValue -Object $script:Installer.Manifest.runtime -Name "commands"))) {
+    foreach ($declaredCommand in @(Convert-ToArray -Value (Get-ObjectPropertyValue -Object $runtime -Name "commands"))) {
         if ("$declaredCommand" -ieq $CommandName) {
             return $true
         }
     }
 
     return $false
+}
+
+function Resolve-PluginManifestPath {
+    param([string]$PluginRoot)
+
+    return (Resolve-FirstExistingPath -Candidates @(
+        $(if (-not [string]::IsNullOrWhiteSpace($PluginRoot)) { Join-Path $PluginRoot "openclaw.plugin.json" } else { $null })
+    ))
+}
+
+function Read-PluginManifestInfo {
+    param([string]$PluginRoot)
+
+    $manifestPath = Resolve-PluginManifestPath -PluginRoot $PluginRoot
+    $manifest = Read-JsonFile -Path $manifestPath
+    if (-not $manifest -or [string]::IsNullOrWhiteSpace("$($manifest.id)")) {
+        return $null
+    }
+
+    return [pscustomobject]@{
+        PluginId = "$($manifest.id)"
+        Root = $PluginRoot
+        ManifestPath = $manifestPath
+    }
+}
+
+function Get-PluginManifestMap {
+    param([string]$RootPath)
+
+    $map = @{}
+    if ([string]::IsNullOrWhiteSpace($RootPath) -or -not (Test-Path -LiteralPath $RootPath -PathType Container)) {
+        return $map
+    }
+
+    foreach ($directory in @(Get-ChildItem -LiteralPath $RootPath -Directory -Force -ErrorAction SilentlyContinue)) {
+        if ($directory.Name -like ".disabled*" -or $directory.Name -like ".backup-*" -or $directory.Name -eq ".openclaw-install-backups" -or $directory.Name -like "*.bak") {
+            continue
+        }
+
+        $pluginInfo = Read-PluginManifestInfo -PluginRoot $directory.FullName
+        if (-not $pluginInfo) {
+            continue
+        }
+
+        if (-not $map.ContainsKey($pluginInfo.PluginId)) {
+            $map[$pluginInfo.PluginId] = [pscustomobject]@{
+                PluginId = $pluginInfo.PluginId
+                Root = $directory.FullName
+                FolderName = $directory.Name
+                ManifestPath = $pluginInfo.ManifestPath
+            }
+        }
+    }
+
+    return $map
+}
+
+function Get-OpenClawUserConfig {
+    return (Read-JsonFile -Path $script:Installer.UserConfigPath)
+}
+
+function Save-OpenClawUserConfig {
+    param([object]$Config)
+
+    if ($null -eq $Config -or [string]::IsNullOrWhiteSpace($script:Installer.UserConfigPath)) {
+        return
+    }
+
+    Ensure-Directory -Path (Split-Path -Path $script:Installer.UserConfigPath -Parent)
+    Save-JsonFile -Path $script:Installer.UserConfigPath -Object $Config
+}
+
+function Resolve-PluginInstallRecord {
+    param(
+        [object]$Config,
+        [string]$PluginId
+    )
+
+    $pluginsConfig = Get-ObjectPropertyValue -Object $Config -Name "plugins"
+    $installsConfig = Get-ObjectPropertyValue -Object $pluginsConfig -Name "installs"
+    if ($null -eq $installsConfig -or [string]::IsNullOrWhiteSpace($PluginId)) {
+        return $null
+    }
+
+    return (Get-ObjectPropertyValue -Object $installsConfig -Name $PluginId)
+}
+
+function Resolve-InstalledPluginRoot {
+    param([string]$PluginId)
+
+    if ([string]::IsNullOrWhiteSpace($PluginId)) {
+        return $null
+    }
+
+    $config = Get-OpenClawUserConfig
+    $record = Resolve-PluginInstallRecord -Config $config -PluginId $PluginId
+    $candidates = @(
+        $(if ($record -and -not [string]::IsNullOrWhiteSpace("$($record.installPath)")) { "$($record.installPath)" } else { $null }),
+        $(if (-not [string]::IsNullOrWhiteSpace($script:Installer.UserExtensionsRoot)) { Join-Path $script:Installer.UserExtensionsRoot $PluginId } else { $null })
+    )
+
+    foreach ($candidate in @($candidates)) {
+        if ([string]::IsNullOrWhiteSpace($candidate) -or -not (Test-Path -LiteralPath $candidate -PathType Container)) {
+            continue
+        }
+
+        $pluginInfo = Read-PluginManifestInfo -PluginRoot $candidate
+        if ($pluginInfo -and $pluginInfo.PluginId -ieq $PluginId) {
+            return $candidate
+        }
+    }
+
+    $globalPlugins = Get-PluginManifestMap -RootPath $script:Installer.UserExtensionsRoot
+    if ($globalPlugins.ContainsKey($PluginId)) {
+        return $globalPlugins[$PluginId].Root
+    }
+
+    return $null
+}
+
+function Test-PluginEnabledInConfig {
+    param([string]$PluginId)
+
+    $config = Get-OpenClawUserConfig
+    $pluginsConfig = Get-ObjectPropertyValue -Object $config -Name "plugins"
+    $entriesConfig = Get-ObjectPropertyValue -Object $pluginsConfig -Name "entries"
+    $pluginEntry = Get-ObjectPropertyValue -Object $entriesConfig -Name $PluginId
+    return [bool](Get-ObjectPropertyValue -Object $pluginEntry -Name "enabled" -Default $false)
+}
+
+function Normalize-RedundantBundledPlugins {
+    if ([string]::IsNullOrWhiteSpace($script:Installer.UserExtensionsRoot) -or [string]::IsNullOrWhiteSpace($script:Installer.BundledExtensionsRoot)) {
+        Add-VerificationEntry -Name "Normalize bundled duplicates" -ExitCode 0 -Message "Skipped: plugin roots could not be resolved."
+        return
+    }
+
+    $bundledPlugins = Get-PluginManifestMap -RootPath $script:Installer.BundledExtensionsRoot
+    $globalPlugins = Get-PluginManifestMap -RootPath $script:Installer.UserExtensionsRoot
+    if ($bundledPlugins.Count -eq 0 -or $globalPlugins.Count -eq 0) {
+        Add-VerificationEntry -Name "Normalize bundled duplicates" -ExitCode 0 -Message "No redundant bundled/global plugin duplicates detected."
+        return
+    }
+
+    $config = Get-OpenClawUserConfig
+    $configChanged = $false
+    $backupRoot = Join-Path $script:Installer.UserStateRoot ("backups\plugin-dedupe\{0}" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
+    $normalizedCount = 0
+
+    foreach ($pluginId in @($globalPlugins.Keys)) {
+        if (-not $bundledPlugins.ContainsKey($pluginId)) {
+            continue
+        }
+
+        $globalPlugin = $globalPlugins[$pluginId]
+        $bundledPlugin = $bundledPlugins[$pluginId]
+        $backupPath = Join-Path $backupRoot $globalPlugin.FolderName
+        if (-not $script:Installer.DryRun) {
+            $suffix = 0
+            while (Test-Path -LiteralPath $backupPath) {
+                $suffix += 1
+                $backupPath = Join-Path $backupRoot ("{0}-{1}" -f $globalPlugin.FolderName, $suffix)
+            }
+        }
+
+        Write-Warn ("Plugin '{0}' already exists in bundled OpenClaw ({1}); duplicate global copy will be moved to backup ({2})." -f $pluginId, $bundledPlugin.Root, $backupPath)
+
+        if ($script:Installer.DryRun) {
+            Write-Note ("Dry-run move duplicate plugin: {0} -> {1}" -f $globalPlugin.Root, $backupPath)
+        } else {
+            Ensure-Directory -Path (Split-Path -Path $backupPath -Parent)
+            Move-Item -LiteralPath $globalPlugin.Root -Destination $backupPath -Force
+        }
+
+        $record = Resolve-PluginInstallRecord -Config $config -PluginId $pluginId
+        if ($record -and "$($record.installPath)" -ieq $globalPlugin.Root) {
+            $pluginsConfig = Get-ObjectPropertyValue -Object $config -Name "plugins"
+            $installsConfig = Get-ObjectPropertyValue -Object $pluginsConfig -Name "installs"
+            if (Remove-ObjectPropertyIfExists -Object $installsConfig -Name $pluginId) {
+                $configChanged = $true
+                Write-Info ("Removed redundant plugins.installs entry for '{0}' from {1}." -f $pluginId, $script:Installer.UserConfigPath)
+            }
+        }
+
+        $normalizedCount += 1
+        $message = if ($script:Installer.DryRun) {
+            "Dry-run: redundant global copy for '{0}' would be moved to backup." -f $pluginId
+        } else {
+            "Redundant global copy for '{0}' was moved to backup." -f $pluginId
+        }
+        Add-VerificationEntry -Name ("Normalize duplicate plugin: {0}" -f $pluginId) -ExitCode 0 -Message $message
+    }
+
+    if ($configChanged) {
+        Save-OpenClawUserConfig -Config $config
+        Write-Ok ("OpenClaw user config normalized: {0}" -f $script:Installer.UserConfigPath)
+    }
+
+    if ($normalizedCount -eq 0) {
+        Add-VerificationEntry -Name "Normalize bundled duplicates" -ExitCode 0 -Message "No redundant bundled/global plugin duplicates detected."
+    }
 }
 
 function Initialize-Context {
@@ -620,7 +900,7 @@ function Initialize-Context {
     $script:Installer.PackManifestPath = Resolve-PackManifestPathCandidate
     $script:Installer.Manifest = Read-JsonFile -Path $script:Installer.PackManifestPath
     if ([string]::IsNullOrWhiteSpace("$($script:Installer.PackId)")) {
-        $script:Installer.PackId = "$($script:Installer.Manifest.packId)"
+        $script:Installer.PackId = "$(Get-ObjectPropertyValue -Object $script:Installer.Manifest -Name "packId")"
     }
     if ([string]::IsNullOrWhiteSpace("$($script:Installer.PackId)")) {
         Write-Err "Workflow pack id could not be resolved."
@@ -642,6 +922,10 @@ function Initialize-Context {
     $script:Installer.SupportBuildMetadataPath = Join-Path $script:Installer.SupportRoot "workflow-pack-build-metadata.json"
     $script:Installer.SupportSourceLockPath = Join-Path $script:Installer.SupportRoot "workflow-pack-source-lock.json"
     $script:Installer.RuntimeRoot = Join-Path $script:Installer.OpenClawRoot ("workflow-packs\{0}\runtime" -f $script:Installer.PackId)
+    $script:Installer.UserStateRoot = Resolve-OpenClawUserStateRoot
+    $script:Installer.UserConfigPath = $(if (-not [string]::IsNullOrWhiteSpace($script:Installer.UserStateRoot)) { Join-Path $script:Installer.UserStateRoot "openclaw.json" } else { $null })
+    $script:Installer.UserExtensionsRoot = $(if (-not [string]::IsNullOrWhiteSpace($script:Installer.UserStateRoot)) { Join-Path $script:Installer.UserStateRoot "extensions" } else { $null })
+    $script:Installer.BundledExtensionsRoot = Resolve-OpenClawBundledExtensionsRoot
 
     if (-not (Test-Path -LiteralPath $script:Installer.InstallStatePath)) {
         Write-Err ("The main OpenClaw install-state.json was not found: {0}" -f $script:Installer.InstallStatePath)
@@ -668,7 +952,7 @@ function Install-PackSupportAssets {
 }
 
 function Install-RuntimePayload {
-    $runtime = $script:Installer.Manifest.runtime
+    $runtime = Get-ObjectPropertyValue -Object $script:Installer.Manifest -Name "runtime"
     if (-not $runtime -or [string]::IsNullOrWhiteSpace("$($runtime.key)")) {
         Write-Note "Workflow pack manifest does not declare a runtime payload."
         return
@@ -682,16 +966,30 @@ function Install-RuntimePayload {
 }
 
 function Install-PluginPack {
-    Write-Info ("Installing plugin pack '{0}' from {1}" -f $script:Installer.Manifest.pluginId, $script:Installer.SupportArchivePath)
-    Invoke-Probe -Name "Install plugin pack" -FilePath $script:Installer.OpenClawWrapperPath -Arguments @("plugins", "install", $script:Installer.SupportArchivePath) -UseCmd
-    Invoke-Probe -Name "Enable plugin pack" -FilePath $script:Installer.OpenClawWrapperPath -Arguments @("plugins", "enable", "$($script:Installer.Manifest.pluginId)") -UseCmd
-    Assert-ProbeSucceeded -Name "Install plugin pack"
-    Assert-ProbeSucceeded -Name "Enable plugin pack"
+    $pluginId = "$(Get-ObjectPropertyValue -Object $script:Installer.Manifest -Name "pluginId")"
+    $existingPluginRoot = Resolve-InstalledPluginRoot -PluginId $pluginId
+    if ($existingPluginRoot) {
+        Write-Info ("Plugin pack '{0}' is already installed at {1}; install step skipped." -f $pluginId, $existingPluginRoot)
+        Add-VerificationEntry -Name "Install plugin pack" -ExitCode 0 -Message "Skipped: plugin already installed."
+    } else {
+        Write-Info ("Installing plugin pack '{0}' from {1}" -f $pluginId, $script:Installer.SupportArchivePath)
+        Invoke-Probe -Name "Install plugin pack" -FilePath $script:Installer.OpenClawWrapperPath -Arguments @("plugins", "install", $script:Installer.SupportArchivePath) -UseCmd
+        Assert-ProbeSucceeded -Name "Install plugin pack"
+    }
+
+    if (Test-PluginEnabledInConfig -PluginId $pluginId) {
+        Write-Info ("Plugin pack '{0}' is already enabled; enable step skipped." -f $pluginId)
+        Add-VerificationEntry -Name "Enable plugin pack" -ExitCode 0 -Message "Skipped: plugin already enabled."
+    } else {
+        Invoke-Probe -Name "Enable plugin pack" -FilePath $script:Installer.OpenClawWrapperPath -Arguments @("plugins", "enable", $pluginId) -UseCmd
+        Assert-ProbeSucceeded -Name "Enable plugin pack"
+    }
 }
 
 function Run-Verification {
     Write-Info ("Verifying workflow pack '{0}'..." -f $script:Installer.PackId)
-    Invoke-Probe -Name "Plugin info" -FilePath $script:Installer.OpenClawWrapperPath -Arguments @("plugins", "info", "$($script:Installer.Manifest.pluginId)") -UseCmd
+    $pluginId = "$(Get-ObjectPropertyValue -Object $script:Installer.Manifest -Name "pluginId")"
+    Invoke-Probe -Name "Plugin info" -FilePath $script:Installer.OpenClawWrapperPath -Arguments @("plugins", "info", $pluginId) -UseCmd
     Invoke-Probe -Name "Plugins doctor" -FilePath $script:Installer.OpenClawWrapperPath -Arguments @("plugins", "doctor") -UseCmd
     Invoke-Probe -Name "Skills check" -FilePath $script:Installer.OpenClawWrapperPath -Arguments @("skills", "check") -UseCmd
     if (Runtime-DeclaresCommand -CommandName "agent-reach") {
@@ -913,18 +1211,22 @@ function Save-WorkflowPackState {
         (Get-Date).ToString("o")
     }
 
+    $runtime = Get-ObjectPropertyValue -Object $script:Installer.Manifest -Name "runtime"
+    $displayName = "$(Get-ObjectPropertyValue -Object $script:Installer.Manifest -Name "displayName")"
+    $version = "$(Get-ObjectPropertyValue -Object $script:Installer.Manifest -Name "version")"
+    $pluginId = "$(Get-ObjectPropertyValue -Object $script:Installer.Manifest -Name "pluginId")"
     $runtimeRoot = if ($script:Installer.RuntimeSourceRoot) {
         $script:Installer.RuntimeRoot
     } else {
         $null
     }
-    $runtimeKey = if ($script:Installer.Manifest.runtime) {
-        "$($script:Installer.Manifest.runtime.key)"
+    $runtimeKey = if ($runtime) {
+        "$(Get-ObjectPropertyValue -Object $runtime -Name "key")"
     } else {
         $null
     }
-    $runtimeLayout = if ($script:Installer.Manifest.runtime) {
-        "$($script:Installer.Manifest.runtime.layout)"
+    $runtimeLayout = if ($runtime) {
+        "$(Get-ObjectPropertyValue -Object $runtime -Name "layout")"
     } else {
         $null
     }
@@ -933,9 +1235,9 @@ function Save-WorkflowPackState {
 
     $payload = [pscustomobject]@{
         packId = $script:Installer.PackId
-        displayName = "$($script:Installer.Manifest.displayName)"
-        version = "$($script:Installer.Manifest.version)"
-        pluginId = "$($script:Installer.Manifest.pluginId)"
+        displayName = $displayName
+        version = $version
+        pluginId = $pluginId
         archivePath = $script:Installer.SupportArchivePath
         manifestPath = $script:Installer.SupportManifestPath
         buildMetadataPath = $script:Installer.SupportBuildMetadataPath
@@ -977,9 +1279,9 @@ function Write-InstallReport {
 
     $payload = [pscustomobject]@{
         packId = $script:Installer.PackId
-        displayName = $(if ($script:Installer.Manifest) { "$($script:Installer.Manifest.displayName)" } else { $null })
-        version = $(if ($script:Installer.Manifest) { "$($script:Installer.Manifest.version)" } else { $null })
-        pluginId = $(if ($script:Installer.Manifest) { "$($script:Installer.Manifest.pluginId)" } else { $null })
+        displayName = $(Get-ObjectPropertyValue -Object $script:Installer.Manifest -Name "displayName")
+        version = $(Get-ObjectPropertyValue -Object $script:Installer.Manifest -Name "version")
+        pluginId = $(Get-ObjectPropertyValue -Object $script:Installer.Manifest -Name "pluginId")
         success = [bool]$Success
         summary = $Summary
         error = $ErrorMessage
@@ -1006,6 +1308,7 @@ function Write-InstallReport {
 
 function Install-WorkflowPack {
     Initialize-Context
+    Normalize-RedundantBundledPlugins
     Install-PackSupportAssets
     Install-RuntimePayload
     Install-PluginPack
