@@ -2317,16 +2317,69 @@ function Get-NpmRegistryCandidates {
     }
 }
 
+function Resolve-NpmExecutable {
+    $commands = @(
+        (Get-Command npm.cmd -ErrorAction SilentlyContinue | Select-Object -First 1),
+        (Get-Command npm -ErrorAction SilentlyContinue | Select-Object -First 1)
+    ) | Where-Object { $null -ne $_ -and -not [string]::IsNullOrWhiteSpace($_.Source) }
+
+    foreach ($command in $commands) {
+        if (Test-Path -LiteralPath $command.Source) {
+            return $command.Source
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($script:Installer.PortableNodeDir)) {
+        foreach ($candidate in @(
+            (Join-Path $script:Installer.PortableNodeDir "npm.cmd"),
+            (Join-Path $script:Installer.PortableNodeDir "npm")
+        )) {
+            if (Test-Path -LiteralPath $candidate) {
+                return $candidate
+            }
+        }
+    }
+
+    return $null
+}
+
+function Invoke-NpmCommandCapture {
+    param(
+        [string[]]$Arguments
+    )
+
+    $npmExecutable = Resolve-NpmExecutable
+    if ([string]::IsNullOrWhiteSpace($npmExecutable)) {
+        throw (L "未检测到可用的 npm。" "No usable npm executable was detected.")
+    }
+
+    return Invoke-CommandCapture { & $npmExecutable @Arguments }
+}
+
 function Get-NpmGlobalBinCandidates {
     $candidates = New-Object System.Collections.Generic.List[string]
+    $npmExecutable = Resolve-NpmExecutable
 
-    try {
-        $prefix = (& npm config get prefix 2>$null).Trim()
-        if (-not [string]::IsNullOrWhiteSpace($prefix)) {
-            $candidates.Add($prefix) | Out-Null
-            $candidates.Add((Join-Path $prefix "bin")) | Out-Null
+    if (-not [string]::IsNullOrWhiteSpace($npmExecutable)) {
+        try {
+            $prefix = (& $npmExecutable config get prefix 2>$null).Trim()
+            if (-not [string]::IsNullOrWhiteSpace($prefix)) {
+                $candidates.Add($prefix) | Out-Null
+                $candidates.Add((Join-Path $prefix "bin")) | Out-Null
+            }
+        } catch {}
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($script:Installer.PortableNodeDir)) {
+        foreach ($candidate in @(
+            $script:Installer.PortableNodeDir,
+            (Join-Path $script:Installer.PortableNodeDir "node_modules\.bin")
+        )) {
+            if (-not [string]::IsNullOrWhiteSpace($candidate)) {
+                $candidates.Add($candidate) | Out-Null
+            }
         }
-    } catch {}
+    }
 
     if (-not [string]::IsNullOrWhiteSpace($env:APPDATA)) {
         $candidates.Add((Join-Path $env:APPDATA "npm")) | Out-Null
@@ -2402,9 +2455,9 @@ function Install-CompanionToolsViaNpm {
     Write-Info ("{0}: ccman" -f (L "正在安装附加工具" "Installing companion tool"))
     $result = $null
     if ([string]::IsNullOrWhiteSpace($Prefix)) {
-        $result = Invoke-WithGitHubHttpsRewrite { Invoke-CommandCapture { npm install -g ccman } }
+        $result = Invoke-WithGitHubHttpsRewrite { Invoke-NpmCommandCapture -Arguments @("install", "-g", "ccman") }
     } else {
-        $result = Invoke-WithGitHubHttpsRewrite { Invoke-CommandCapture { npm install -g ccman --prefix $Prefix } }
+        $result = Invoke-WithGitHubHttpsRewrite { Invoke-NpmCommandCapture -Arguments @("install", "-g", "ccman", "--prefix", $Prefix) }
     }
     Assert-CommandCaptureResult -Result $result -Context "npm install -g ccman"
 
@@ -2424,6 +2477,93 @@ function Install-CompanionToolsViaNpm {
 
     Register-CompanionCommand -Name "ccman" -Type "cmd" -TargetPath $commandPath
     Write-Ok (L "ccman 安装完成。" "ccman installation completed.")
+}
+
+function Install-OptionalCompanionToolViaNpm {
+    param(
+        [string]$PackageName,
+        [string]$CommandName = $PackageName
+    )
+
+    if ([string]::IsNullOrWhiteSpace($PackageName) -or [string]::IsNullOrWhiteSpace($CommandName)) {
+        return $false
+    }
+
+    $existingCommandPath = Resolve-NpmInstalledCommand -CommandName $CommandName
+    if (-not [string]::IsNullOrWhiteSpace($existingCommandPath) -and (Test-Path -LiteralPath $existingCommandPath)) {
+        Register-CompanionCommand -Name $CommandName -Type "cmd" -TargetPath $existingCommandPath
+        Write-Note ("{0}: {1}" -f (L "已检测到可选附加工具" "Detected optional companion tool"), $CommandName)
+        return $true
+    }
+
+    if ($script:Installer.DryRun) {
+        Register-CompanionCommand -Name $CommandName -Type "cmd" -TargetPath (Join-Path $env:APPDATA ("npm\{0}.cmd" -f $CommandName))
+        Write-Note ("{0}: {1}" -f (L "DryRun 跳过可选附加工具安装" "Dry-run skipped optional companion tool install"), $CommandName)
+        return $true
+    }
+
+    if ([string]::IsNullOrWhiteSpace((Resolve-NpmExecutable))) {
+        Write-Warn ("{0}: {1}" -f (L "npm 不可用，已跳过可选附加工具安装" "npm is unavailable; skipping optional companion tool install"), $CommandName)
+        return $false
+    }
+
+    foreach ($registry in (Get-NpmRegistryCandidates)) {
+        Write-Info ("{0}: {1} ({2})" -f (L "正在安装可选附加工具" "Installing optional companion tool"), $CommandName, $registry)
+
+        $previousRegistry = $env:npm_config_registry
+        $previousProxy = $env:npm_config_proxy
+        $previousHttpsProxy = $env:npm_config_https_proxy
+        $previousLogLevel = $env:NPM_CONFIG_LOGLEVEL
+        $previousNotifier = $env:NPM_CONFIG_UPDATE_NOTIFIER
+        $previousFund = $env:NPM_CONFIG_FUND
+        $previousAudit = $env:NPM_CONFIG_AUDIT
+        $previousScriptShell = $env:NPM_CONFIG_SCRIPT_SHELL
+
+        $env:npm_config_registry = $registry
+        $env:NPM_CONFIG_LOGLEVEL = "error"
+        $env:NPM_CONFIG_UPDATE_NOTIFIER = "false"
+        $env:NPM_CONFIG_FUND = "false"
+        $env:NPM_CONFIG_AUDIT = "false"
+        $env:NPM_CONFIG_SCRIPT_SHELL = "cmd.exe"
+        if (-not [string]::IsNullOrWhiteSpace($env:HTTP_PROXY)) { $env:npm_config_proxy = $env:HTTP_PROXY }
+        if (-not [string]::IsNullOrWhiteSpace($env:HTTPS_PROXY)) { $env:npm_config_https_proxy = $env:HTTPS_PROXY }
+
+        try {
+            $result = Invoke-WithGitHubHttpsRewrite { Invoke-NpmCommandCapture -Arguments @("install", "-g", $PackageName) }
+            Assert-CommandCaptureResult -Result $result -Context ("npm install -g {0}" -f $PackageName)
+            if ($result.ExitCode -ne 0) {
+                Write-Warn ("{0}: {1} ({2})" -f (L "可选附加工具安装返回非零退出码" "Optional companion tool install returned a non-zero exit code"), $CommandName, $result.ExitCode)
+                continue
+            }
+
+            $commandPath = Resolve-NpmInstalledCommand -CommandName $CommandName
+            if (-not [string]::IsNullOrWhiteSpace($commandPath) -and (Test-Path -LiteralPath $commandPath)) {
+                Register-CompanionCommand -Name $CommandName -Type "cmd" -TargetPath $commandPath
+                Write-Ok ("{0}: {1}" -f (L "可选附加工具安装完成" "Optional companion tool installed"), $CommandName)
+                return $true
+            }
+
+            Write-Warn ("{0}: {1}" -f (L "可选附加工具安装成功，但未找到命令包装器" "Optional companion tool installed, but its command wrapper was not found"), $CommandName)
+        } catch {
+            Write-Warn ("{0}: {1}" -f (L "可选附加工具安装失败" "Optional companion tool install failed"), $_.Exception.Message)
+        } finally {
+            $env:npm_config_registry = $previousRegistry
+            $env:npm_config_proxy = $previousProxy
+            $env:npm_config_https_proxy = $previousHttpsProxy
+            $env:NPM_CONFIG_LOGLEVEL = $previousLogLevel
+            $env:NPM_CONFIG_UPDATE_NOTIFIER = $previousNotifier
+            $env:NPM_CONFIG_FUND = $previousFund
+            $env:NPM_CONFIG_AUDIT = $previousAudit
+            $env:NPM_CONFIG_SCRIPT_SHELL = $previousScriptShell
+        }
+    }
+
+    Write-Warn ("{0}: {1}" -f (L "可选附加工具安装已跳过或失败" "Optional companion tool install was skipped or failed"), $CommandName)
+    return $false
+}
+
+function Install-OptionalCompanionTools {
+    [void](Install-OptionalCompanionToolViaNpm -PackageName "clawhub" -CommandName "clawhub")
 }
 
 function Install-NpmRoute {
@@ -4139,6 +4279,24 @@ function Verify-InstalledDependencies {
     } else {
         Add-DependencyCheck -Name "ccman" -Summary (L "未检测到 ccman 包装器。" "ccman wrapper was not detected.") -Level "warn"
     }
+
+    $clawhubWrapperPath = Get-CompanionWrapperPath -Name "clawhub"
+    if ($clawhubWrapperPath) {
+        $clawhubResult = Invoke-CmdFileCapture -FilePath $clawhubWrapperPath -Arguments @("--version") -TimeoutSeconds 20
+        if ($clawhubResult.TimedOut) {
+            Add-DependencyCheck -Name "clawhub" -Summary (L "包装器存在，但版本检查超时。" "Wrapper exists, but version check timed out.") -Level "warn" -Path $clawhubWrapperPath
+        } elseif ($clawhubResult.ExitCode -eq 0) {
+            $clawhubVersion = Get-FirstOutputLine -Output $clawhubResult.Output
+            if ([string]::IsNullOrWhiteSpace($clawhubVersion)) {
+                $clawhubVersion = L "已安装（包装器已生成）。" "Installed (wrapper created)."
+            }
+            Add-DependencyCheck -Name "clawhub" -Summary $clawhubVersion -Level "ok" -Path $clawhubWrapperPath
+        } else {
+            Add-DependencyCheck -Name "clawhub" -Summary (L "包装器已生成，但 --version 返回非零退出码。" "Wrapper was created, but --version returned a non-zero exit code.") -Level "note" -Path $clawhubWrapperPath
+        }
+    } else {
+        Add-DependencyCheck -Name "clawhub" -Summary (L "未检测到 clawhub 包装器。" "clawhub wrapper was not detected.") -Level "note"
+    }
 }
 
 function Verify-Installation {
@@ -4149,6 +4307,7 @@ function Verify-Installation {
         Add-DependencyCheck -Name "Node.js" -Summary "dry-run" -Level "ok"
         Add-DependencyCheck -Name "Git" -Summary "dry-run" -Level "note"
         Add-DependencyCheck -Name "ccman" -Summary "dry-run" -Level "ok"
+        Add-DependencyCheck -Name "clawhub" -Summary "dry-run" -Level "ok"
         Write-Ok (L "DryRun 验证通过。" "Dry-run verification passed.")
         return
     }
@@ -4188,6 +4347,139 @@ function Run-Doctor {
         }
     } catch {
         Write-Warn ("{0}: {1}" -f (L "doctor 执行失败" "doctor failed"), $_.Exception.Message)
+    }
+}
+
+function Get-DefaultPostInstallOnboardingArguments {
+    return @(
+        "onboard",
+        "--non-interactive",
+        "--accept-risk",
+        "--mode", "local",
+        "--auth-choice", "skip",
+        "--install-daemon",
+        "--skip-channels",
+        "--skip-skills",
+        "--skip-health",
+        "--skip-ui"
+    )
+}
+
+function Write-InstalledCommandOutput {
+    param(
+        [object]$Result,
+        [string]$Prefix = $null
+    )
+
+    if ($null -eq $Result) {
+        return
+    }
+
+    foreach ($line in @($Result.Output)) {
+        if ([string]::IsNullOrWhiteSpace("$line")) {
+            continue
+        }
+
+        if ([string]::IsNullOrWhiteSpace($Prefix)) {
+            Write-Note "$line"
+        } else {
+            Write-Note ("{0}: {1}" -f $Prefix, $line)
+        }
+    }
+}
+
+function Enable-DefaultBundledHooks {
+    $hookNames = @(
+        "session-memory",
+        "bootstrap-extra-files",
+        "command-logger",
+        "boot-md"
+    )
+
+    if ($script:Installer.DryRun) {
+        Write-Note (L "DryRun 将启用 hooks.internal.enabled 和全部内置 hooks。" "Dry-run would enable hooks.internal.enabled and all bundled hooks.")
+        return $true
+    }
+
+    Write-Info (L "正在开启内置 hooks ..." "Enabling bundled hooks ...")
+    $enableInternalResult = Invoke-InstalledOpenClaw -Arguments @("config", "set", "hooks.internal.enabled", "true", "--strict-json") -TimeoutSeconds 60
+    if ($enableInternalResult.TimedOut) {
+        Write-Warn (L "开启 hooks.internal.enabled 超时。" "Enabling hooks.internal.enabled timed out.")
+        return $false
+    }
+    if ($enableInternalResult.ExitCode -ne 0) {
+        Write-Warn (L "开启 hooks.internal.enabled 失败。" "Failed to enable hooks.internal.enabled.")
+        Write-InstalledCommandOutput -Result $enableInternalResult -Prefix "hooks"
+        return $false
+    }
+
+    $allSucceeded = $true
+    foreach ($hookName in $hookNames) {
+        $result = Invoke-InstalledOpenClaw -Arguments @("hooks", "enable", $hookName) -TimeoutSeconds 60
+        if ($result.TimedOut) {
+            Write-Warn ("{0}: {1}" -f (L "启用 hook 超时" "Timed out while enabling hook"), $hookName)
+            $allSucceeded = $false
+            continue
+        }
+        if ($result.ExitCode -ne 0) {
+            Write-Warn ("{0}: {1}" -f (L "启用 hook 失败" "Failed to enable hook"), $hookName)
+            Write-InstalledCommandOutput -Result $result -Prefix $hookName
+            $allSucceeded = $false
+            continue
+        }
+
+        Write-Ok ("{0}: {1}" -f (L "hook 已启用" "Hook enabled"), $hookName)
+    }
+
+    return $allSucceeded
+}
+
+function Invoke-AutomatedPostInstallBootstrap {
+    if ($script:Installer.NoOnboard) {
+        Write-Note (L "根据参数跳过自动初始化配置。" "Skipping automated post-install bootstrap because of parameter.")
+        return [pscustomobject]@{
+            Automated                   = $false
+            RequiresInteractiveFallback = $false
+        }
+    }
+
+    $arguments = @(Get-DefaultPostInstallOnboardingArguments)
+    if ($script:Installer.DryRun) {
+        Write-Note ("{0}: openclaw {1}" -f (L "DryRun 自动初始化" "Dry-run automated bootstrap"), ($arguments -join " "))
+        return [pscustomobject]@{
+            Automated                   = $true
+            RequiresInteractiveFallback = $false
+        }
+    }
+
+    Write-Info (L "正在执行安装后自动初始化配置..." "Running automated post-install bootstrap...")
+    $result = Invoke-InstalledOpenClaw -Arguments $arguments -TimeoutSeconds 300
+    if ($result.TimedOut) {
+        Write-Warn (L "自动初始化配置超时，将回退到交互式配置窗口。" "Automated bootstrap timed out; falling back to the interactive configuration window.")
+        return [pscustomobject]@{
+            Automated                   = $false
+            RequiresInteractiveFallback = $true
+        }
+    }
+
+    if ($result.ExitCode -ne 0) {
+        Write-Warn ("{0}: {1}" -f (L "自动初始化配置失败，将回退到交互式配置窗口" "Automated bootstrap failed; falling back to the interactive configuration window"), $result.ExitCode)
+        Write-InstalledCommandOutput -Result $result -Prefix "bootstrap"
+        return [pscustomobject]@{
+            Automated                   = $false
+            RequiresInteractiveFallback = $true
+        }
+    }
+
+    Write-Ok (L "安装后自动初始化配置完成。" "Automated post-install bootstrap completed.")
+    $hooksEnabled = Enable-DefaultBundledHooks
+    if (-not $hooksEnabled) {
+        Write-Warn (L "部分内置 hooks 未能启用，请查看日志。" "Some bundled hooks could not be enabled; check the log.")
+    }
+
+    return [pscustomobject]@{
+        Automated                   = $true
+        RequiresInteractiveFallback = $false
     }
 }
 
@@ -4359,21 +4651,27 @@ function Invoke-InstallFlow {
         }
 
         if ($succeeded) {
+            Install-OptionalCompanionTools
             Verify-Installation
             [void](Install-LicenseCliEntrypointHook)
             Install-Wrapper
             Install-CompanionWrappers
             Install-QuickLaunchExecutable
+            Verify-InstalledDependencies
             $licenseActivated = Try-ActivateLicenseAfterInstall
             Remove-LegacyCurrentUserInstallArtifacts
             Enable-ClassicConsolePasteForCurrentUser
+            $postInstallBootstrap = $null
             if ($licenseActivated) {
+                $postInstallBootstrap = Invoke-AutomatedPostInstallBootstrap
                 Run-Doctor
             } else {
                 Write-Warn (L "授权二次确认未完成；仍将打开配置窗口，后续可在配置窗口继续完成授权与初始化。" "Post-install license recheck did not complete; opening configuration window anyway so authorization and initialization can continue there.")
             }
             Show-SuccessSummary
-            Open-ConfigurationPage
+            if (-not $licenseActivated -or ($null -ne $postInstallBootstrap -and $postInstallBootstrap.RequiresInteractiveFallback)) {
+                Open-ConfigurationPage
+            }
             return
         }
     }
