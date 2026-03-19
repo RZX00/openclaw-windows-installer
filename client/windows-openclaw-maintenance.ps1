@@ -368,6 +368,42 @@ function Get-DefaultCapabilities {
     }
 }
 
+function Get-CapabilityPresetForRuntimeVersion {
+    param([string]$RuntimeVersion)
+
+    $normalizedRuntimeVersion = Get-NormalizedReleaseVersion -VersionText $RuntimeVersion
+    if ([string]::IsNullOrWhiteSpace($normalizedRuntimeVersion)) {
+        return $null
+    }
+
+    # The bundled modern Windows runtime exposes the commands required by the
+    # one-click maintenance flow. Prefer a version preset over cold-start help probes.
+    $presetFloorVersion = "2026.3.13"
+    if ((Compare-ReleaseVersions -Left $normalizedRuntimeVersion -Right $presetFloorVersion) -lt 0) {
+        return $null
+    }
+
+    $preset = Get-DefaultCapabilities
+    foreach ($key in @($preset.Keys)) {
+        $preset[$key] = $true
+    }
+
+    return $preset
+}
+
+function Test-CapabilityStateHasEnabledFlags {
+    param([object]$InputObject)
+
+    $normalized = Convert-CapabilityState -InputObject $InputObject
+    foreach ($key in @($normalized.Keys)) {
+        if ([bool]$normalized[$key]) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
 function Get-DefaultGatewayTokenState {
     return [ordered]@{
         status  = "unknown"
@@ -2106,6 +2142,7 @@ function Resolve-Capabilities {
     $cacheVersion = Get-StateProperty -State $state -Name "capabilitiesRuntimeVersion"
     $rawCachedCapabilities = Get-StateProperty -State $state -Name "capabilities"
     $cachedCapabilities = Convert-CapabilityState -InputObject $rawCachedCapabilities
+    $presetCapabilities = Get-CapabilityPresetForRuntimeVersion -RuntimeVersion $RuntimeVersion
 
     $cacheIsComplete = $true
     foreach ($key in @($defaults.Keys)) {
@@ -2120,6 +2157,26 @@ function Resolve-Capabilities {
             $cacheIsComplete = $false
             break
         }
+    }
+
+    if ($null -ne $presetCapabilities) {
+        $cacheHasEnabledFlags = Test-CapabilityStateHasEnabledFlags -InputObject $cachedCapabilities
+        if (-not $ForceRefresh -and -not [string]::IsNullOrWhiteSpace("$RuntimeVersion") -and -not [string]::IsNullOrWhiteSpace("$cacheVersion") -and [string]::Equals("$RuntimeVersion", "$cacheVersion", [System.StringComparison]::OrdinalIgnoreCase) -and $cacheIsComplete -and $cacheHasEnabledFlags) {
+            Write-Log -Level "INFO" -Message ("Replacing cached capabilities with the inferred preset for runtime {0} to avoid slow cold-start probes." -f $RuntimeVersion)
+        }
+
+        foreach ($entry in $presetCapabilities.GetEnumerator()) {
+            $script:Context.Capabilities[$entry.Key] = [bool]$entry.Value
+        }
+
+        $persistUpdates = [ordered]@{
+            capabilities = [pscustomobject]$presetCapabilities
+            capabilitiesRuntimeVersion = $RuntimeVersion
+        }
+        Persist-InstallState -StateUpdates $persistUpdates
+
+        Write-Log -Level "INFO" -Message ("Using inferred capability preset for runtime {0}: {1}" -f $RuntimeVersion, (($script:Context.Capabilities.GetEnumerator() | ForEach-Object { "{0}={1}" -f $_.Key, $_.Value }) -join ", "))
+        return [pscustomobject]$script:Context.Capabilities
     }
 
     if (-not $ForceRefresh -and -not [string]::IsNullOrWhiteSpace("$RuntimeVersion") -and -not [string]::IsNullOrWhiteSpace("$cacheVersion") -and [string]::Equals("$RuntimeVersion", "$cacheVersion", [System.StringComparison]::OrdinalIgnoreCase) -and $cacheIsComplete) {

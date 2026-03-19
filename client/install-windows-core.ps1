@@ -200,6 +200,99 @@ function Get-OptionalObjectProperty {
     return $DefaultValue
 }
 
+function Get-DefaultCapabilityState {
+    return [ordered]@{
+        DaemonStatusJson           = $false
+        StatusDeep                 = $false
+        StatusAll                  = $false
+        HealthJson                 = $false
+        GatewayStatusRequireRpc    = $false
+        GatewayStatusJson          = $false
+        GatewayStatus              = $false
+        GatewayInstall             = $false
+        GatewayStart               = $false
+        GatewayStop                = $false
+        GatewayRestart             = $false
+        DoctorRepair               = $false
+        DoctorNonInteractive       = $false
+        DoctorGenerateGatewayToken = $false
+        Dashboard                  = $false
+        DashboardNoOpen            = $false
+        ModelsStatusJson           = $false
+        ModelsStatusPlain          = $false
+        ModelsStatusCheck          = $false
+        ModelsAuthAdd              = $false
+        ModelsAuthLogin            = $false
+        ModelsAuthSetupToken       = $false
+    }
+}
+
+function Get-NormalizedReleaseVersion {
+    param([string]$VersionText)
+
+    if ([string]::IsNullOrWhiteSpace($VersionText)) {
+        return $null
+    }
+
+    $match = [regex]::Match($VersionText, '\d+(?:\.\d+)+')
+    if (-not $match.Success) {
+        return $null
+    }
+
+    return $match.Value.Trim('.')
+}
+
+function Compare-ReleaseVersions {
+    param(
+        [string]$Left,
+        [string]$Right
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Left) -and [string]::IsNullOrWhiteSpace($Right)) {
+        return 0
+    }
+    if ([string]::IsNullOrWhiteSpace($Left)) {
+        return -1
+    }
+    if ([string]::IsNullOrWhiteSpace($Right)) {
+        return 1
+    }
+
+    $normalizedLeft = Get-NormalizedReleaseVersion -VersionText $Left
+    $normalizedRight = Get-NormalizedReleaseVersion -VersionText $Right
+
+    if (-not [string]::IsNullOrWhiteSpace($normalizedLeft) -and -not [string]::IsNullOrWhiteSpace($normalizedRight)) {
+        try {
+            return ([version]$normalizedLeft).CompareTo([version]$normalizedRight)
+        } catch {}
+    }
+
+    return [string]::Compare($Left, $Right, $true)
+}
+
+function Get-CapabilityPresetForRuntimeVersion {
+    param([string]$RuntimeVersion)
+
+    $normalizedRuntimeVersion = Get-NormalizedReleaseVersion -VersionText $RuntimeVersion
+    if ([string]::IsNullOrWhiteSpace($normalizedRuntimeVersion)) {
+        return $null
+    }
+
+    # Modern bundled runtimes in this installer support the commands the one-click
+    # maintenance flow depends on; seeding the cache avoids fragile cold-start help probes.
+    $presetFloorVersion = "2026.3.13"
+    if ((Compare-ReleaseVersions -Left $normalizedRuntimeVersion -Right $presetFloorVersion) -lt 0) {
+        return $null
+    }
+
+    $preset = Get-DefaultCapabilityState
+    foreach ($key in @($preset.Keys)) {
+        $preset[$key] = $true
+    }
+
+    return $preset
+}
+
 function Set-ConsoleUtf8 {
     try {
         & cmd /c chcp 65001 > $null
@@ -3385,6 +3478,14 @@ function Get-MaintenanceExecutableDefinitions {
 }
 
 function Save-InstallState {
+    $normalizedInstalledVersion = Get-NormalizedReleaseVersion -VersionText $script:Installer.InstalledVersion
+    $seededCapabilities = Get-CapabilityPresetForRuntimeVersion -RuntimeVersion $normalizedInstalledVersion
+    $persistedCapabilities = if ($null -ne $seededCapabilities) {
+        $seededCapabilities
+    } else {
+        Get-DefaultCapabilityState
+    }
+
     $payload = [ordered]@{
         schemaVersion         = 1
         locale                = $script:Installer.Locale
@@ -3414,31 +3515,8 @@ function Save-InstallState {
         runtimeControlMode    = $script:Installer.RuntimeControlMode
         lastLicenseCheckAt    = $null
         startMode             = "local-stable"
-        capabilities          = [ordered]@{
-            DaemonStatusJson         = $false
-            StatusDeep               = $false
-            StatusAll                = $false
-            HealthJson               = $false
-            GatewayStatusRequireRpc  = $false
-            GatewayStatusJson        = $false
-            GatewayStatus            = $false
-            GatewayInstall           = $false
-            GatewayStart             = $false
-            GatewayStop              = $false
-            GatewayRestart           = $false
-            DoctorRepair             = $false
-            DoctorNonInteractive     = $false
-            DoctorGenerateGatewayToken = $false
-            Dashboard                = $false
-            DashboardNoOpen          = $false
-            ModelsStatusJson         = $false
-            ModelsStatusPlain        = $false
-            ModelsStatusCheck        = $false
-            ModelsAuthAdd            = $false
-            ModelsAuthLogin          = $false
-            ModelsAuthSetupToken     = $false
-        }
-        capabilitiesRuntimeVersion = $null
+        capabilities          = $persistedCapabilities
+        capabilitiesRuntimeVersion = if ($null -ne $seededCapabilities) { $normalizedInstalledVersion } else { $null }
         gatewayTokenState     = [ordered]@{
             status  = "unknown"
             mode    = "token"
