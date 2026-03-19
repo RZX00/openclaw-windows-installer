@@ -1193,6 +1193,289 @@ function Resolve-WorkflowPackArchivePath {
     ))
 }
 
+function Convert-ToArray {
+    param([object]$Value)
+
+    if ($null -eq $Value) {
+        return @()
+    }
+
+    return @($Value)
+}
+
+function Get-FileSha256 {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $null
+    }
+
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [System.IO.File]::OpenRead($Path)
+        try {
+            return ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+        } finally {
+            $stream.Dispose()
+        }
+    } finally {
+        $sha.Dispose()
+    }
+}
+
+function Resolve-WorkflowPackBuildMetadataPath {
+    param(
+        [object]$ExistingState,
+        [string]$SupportRoot
+    )
+
+    $existingPath = Get-StateProperty -State $ExistingState -Name "buildMetadataPath"
+    if (-not [string]::IsNullOrWhiteSpace("$existingPath")) {
+        return "$existingPath"
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($SupportRoot)) {
+        return (Join-Path $SupportRoot "workflow-pack-build-metadata.json")
+    }
+
+    return $null
+}
+
+function Resolve-WorkflowPackSourceLockPath {
+    param(
+        [object]$ExistingState,
+        [string]$SupportRoot
+    )
+
+    $existingPath = Get-StateProperty -State $ExistingState -Name "sourceLockPath"
+    if (-not [string]::IsNullOrWhiteSpace("$existingPath")) {
+        return "$existingPath"
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($SupportRoot)) {
+        return (Join-Path $SupportRoot "workflow-pack-source-lock.json")
+    }
+
+    return $null
+}
+
+function Get-WorkflowPackSchemaVersion {
+    param([object]$WorkflowPack)
+
+    $rawVersion = Get-StateProperty -State $WorkflowPack.Manifest -Name "schemaVersion" -Default 0
+    $schemaVersion = 0
+    [void][int]::TryParse("$rawVersion", [ref]$schemaVersion)
+    return $schemaVersion
+}
+
+function Test-WorkflowPackRequiresLockedMetadata {
+    param([object]$WorkflowPack)
+
+    $hasBuildMetadataFile = (-not [string]::IsNullOrWhiteSpace("$($WorkflowPack.BuildMetadataPath)") -and (Test-Path -LiteralPath $WorkflowPack.BuildMetadataPath -PathType Leaf))
+    $hasSourceLockFile = (-not [string]::IsNullOrWhiteSpace("$($WorkflowPack.SourceLockPath)") -and (Test-Path -LiteralPath $WorkflowPack.SourceLockPath -PathType Leaf))
+
+    return (
+        (Get-WorkflowPackSchemaVersion -WorkflowPack $WorkflowPack) -ge 2 -or
+        $hasBuildMetadataFile -or
+        $hasSourceLockFile -or
+        -not [string]::IsNullOrWhiteSpace("$($WorkflowPack.SavedBuildMetadataSha256)") -or
+        -not [string]::IsNullOrWhiteSpace("$($WorkflowPack.SavedSourceLockSha256)")
+    )
+}
+
+function New-WorkflowPackCheckResult {
+    param(
+        [string]$Name,
+        [string]$Summary,
+        [int]$ExitCode = 0,
+        [bool]$TimedOut = $false,
+        [string[]]$Arguments = @(),
+        [string]$Category = "workflow-pack",
+        [string]$Severity = "error",
+        [bool]$Repairable = $false
+    )
+
+    return [pscustomobject]@{
+        name       = $Name
+        exitCode   = $ExitCode
+        timedOut   = [bool]$TimedOut
+        summary    = $Summary
+        arguments  = @($Arguments)
+        category   = $Category
+        severity   = $Severity
+        repairable = [bool]$Repairable
+    }
+}
+
+function Test-WorkflowPackCommandAvailable {
+    param([string]$CommandName)
+
+    if ([string]::IsNullOrWhiteSpace($CommandName)) {
+        return $false
+    }
+
+    foreach ($candidate in @(
+        (Join-Path $script:Context.WrapperDir ("{0}.cmd" -f $CommandName)),
+        (Join-Path $script:Context.WrapperDir ("{0}.exe" -f $CommandName))
+    )) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return $true
+        }
+    }
+
+    return ($null -ne (Get-Command $CommandName -ErrorAction SilentlyContinue))
+}
+
+function Resolve-WorkflowPackManagedRootPath {
+    param(
+        [object]$WorkflowPack,
+        [string]$RootName
+    )
+
+    switch ("$RootName") {
+        "support" { return $WorkflowPack.SupportRoot }
+        "runtime" { return $WorkflowPack.RuntimeRoot }
+        default   { return $script:Context.DataRoot }
+    }
+}
+
+function Resolve-WorkflowPackManagedTargetPath {
+    param(
+        [object]$WorkflowPack,
+        [object]$Rule
+    )
+
+    $rootName = Get-StateProperty -State $Rule -Name "root" -Default "openclaw"
+    $relativePath = Get-StateProperty -State $Rule -Name "path"
+    if ([string]::IsNullOrWhiteSpace("$relativePath")) {
+        return $null
+    }
+
+    return (Join-Path (Resolve-WorkflowPackManagedRootPath -WorkflowPack $WorkflowPack -RootName $rootName) "$relativePath")
+}
+
+function Invoke-WorkflowPackProvisioningVerification {
+    param([object]$WorkflowPack)
+
+    $results = New-Object System.Collections.Generic.List[object]
+    foreach ($rule in @(Convert-ToArray -Value (Get-StateProperty -State $WorkflowPack.Manifest -Name "provisioning"))) {
+        $ruleType = "$(Get-StateProperty -State $rule -Name 'type')"
+        $targetPath = Resolve-WorkflowPackManagedTargetPath -WorkflowPack $WorkflowPack -Rule $rule
+        $success = $false
+        $summary = $null
+        $sourcePath = $null
+
+        switch ($ruleType) {
+            "ensure-directory" {
+                $success = (-not [string]::IsNullOrWhiteSpace($targetPath) -and (Test-Path -LiteralPath $targetPath -PathType Container))
+                $summary = if ($success) { "Directory is present." } else { "Provisioned directory is missing." }
+            }
+            "ensure-json-file" {
+                $success = (-not [string]::IsNullOrWhiteSpace($targetPath) -and (Test-Path -LiteralPath $targetPath -PathType Leaf))
+                $summary = if ($success) { "JSON file is present." } else { "Provisioned JSON file is missing." }
+            }
+            "copy-tree" {
+                $sourceRootName = Get-StateProperty -State $rule -Name "sourceRoot" -Default "support"
+                $sourceRelativePath = Get-StateProperty -State $rule -Name "sourcePath"
+                if (-not [string]::IsNullOrWhiteSpace("$sourceRelativePath")) {
+                    $sourcePath = Join-Path (Resolve-WorkflowPackManagedRootPath -WorkflowPack $WorkflowPack -RootName $sourceRootName) "$sourceRelativePath"
+                }
+                $success = (-not [string]::IsNullOrWhiteSpace($targetPath) -and (Test-Path -LiteralPath $targetPath -PathType Container))
+                $summary = if ($success) { "Provisioned directory tree is present." } else { "Provisioned directory tree is missing." }
+            }
+            default {
+                $summary = "Unknown provisioning rule type."
+            }
+        }
+
+        $results.Add([pscustomobject]@{
+            type    = $ruleType
+            path    = $targetPath
+            source  = $sourcePath
+            success = [bool]$success
+            summary = $summary
+        }) | Out-Null
+    }
+
+    return @($results.ToArray())
+}
+
+function Invoke-WorkflowPackPrerequisiteVerification {
+    param([object]$WorkflowPack)
+
+    $results = New-Object System.Collections.Generic.List[object]
+    foreach ($rule in @(Convert-ToArray -Value (Get-StateProperty -State $WorkflowPack.Manifest -Name "prerequisites"))) {
+        $ruleType = "$(Get-StateProperty -State $rule -Name 'type')"
+        $severity = "$(Get-StateProperty -State $rule -Name 'severity' -Default 'warning')"
+        $message = "$(Get-StateProperty -State $rule -Name 'message')"
+        $success = $false
+        $summary = $message
+
+        switch ($ruleType) {
+            "command-available" {
+                $success = Test-WorkflowPackCommandAvailable -CommandName "$(Get-StateProperty -State $rule -Name 'command')"
+                $summary = if ($success) { "Command is available." } else { $message }
+            }
+            "path-exists" {
+                $targetPath = Resolve-WorkflowPackManagedTargetPath -WorkflowPack $WorkflowPack -Rule $rule
+                $success = (-not [string]::IsNullOrWhiteSpace($targetPath) -and (Test-Path -LiteralPath $targetPath))
+                $summary = if ($success) { "Path exists." } else { $message }
+            }
+            "manual-step" {
+                $success = $false
+                $summary = $message
+            }
+            default {
+                $success = $false
+                $summary = "Unknown prerequisite type."
+            }
+        }
+
+        $results.Add([pscustomobject]@{
+            id       = "$(Get-StateProperty -State $rule -Name 'id')"
+            type     = $ruleType
+            severity = $severity
+            success  = [bool]$success
+            summary  = $summary
+        }) | Out-Null
+    }
+
+    return @($results.ToArray())
+}
+
+function Get-WorkflowPackReadinessState {
+    param(
+        [object[]]$RequiredSourceFailures,
+        [object[]]$ProvisioningResults,
+        [object[]]$PrerequisiteResults,
+        [object[]]$IntegrityIssues
+    )
+
+    $blockingPrereqs = @(@($PrerequisiteResults) | Where-Object { -not $_.success -and $_.severity -eq "error" })
+    $warningPrereqs = @(@($PrerequisiteResults) | Where-Object { -not $_.success -and $_.severity -ne "error" })
+    $provisioningFailures = @(@($ProvisioningResults) | Where-Object { -not $_.success })
+    $integrityItems = @($IntegrityIssues)
+    $requiredSourceItems = @($RequiredSourceFailures)
+
+    $status = if ($requiredSourceItems.Count -gt 0 -or $provisioningFailures.Count -gt 0 -or $blockingPrereqs.Count -gt 0 -or $integrityItems.Count -gt 0) {
+        "needs-attention"
+    } elseif ($warningPrereqs.Count -gt 0) {
+        "warning"
+    } else {
+        "ready"
+    }
+
+    return [pscustomobject]@{
+        status = $status
+        summary = $(if ($status -eq "ready") { "Workflow pack verification is healthy." } elseif ($status -eq "warning") { "Workflow pack is installed, but some manual follow-up may still be required." } else { "Workflow pack verification found blocking issues that need manual attention." })
+        unresolvedRequiredSkills = @($requiredSourceItems)
+        integrityIssues = @($integrityItems)
+        provisioningFailures = @($provisioningFailures)
+        blockingPrerequisites = @($blockingPrereqs)
+        warningPrerequisites = @($warningPrereqs)
+    }
+}
+
 function Resolve-InstalledWorkflowPacks {
     param([object]$State = (Resolve-InstallState))
 
@@ -1244,14 +1527,19 @@ function Resolve-InstalledWorkflowPacks {
         }
 
         $resolved.Add([pscustomobject]@{
-            PackId       = $packId
-            DisplayName  = $displayName
-            PluginId     = $pluginId
-            Version      = $(if ($manifest -and -not [string]::IsNullOrWhiteSpace("$($manifest.version)")) { "$($manifest.version)" } elseif (-not [string]::IsNullOrWhiteSpace("$(Get-StateProperty -State $existingState -Name 'version')")) { "$(Get-StateProperty -State $existingState -Name 'version')" } else { $null })
-            SupportRoot  = $packSupportRoot
-            ManifestPath = $manifestPath
-            Manifest     = $manifest
-            ArchivePath  = Resolve-WorkflowPackArchivePath -ExistingState $existingState -Manifest $manifest -SupportRoot $packSupportRoot
+            PackId                   = $packId
+            DisplayName              = $displayName
+            PluginId                 = $pluginId
+            Version                  = $(if ($manifest -and -not [string]::IsNullOrWhiteSpace("$($manifest.version)")) { "$($manifest.version)" } elseif (-not [string]::IsNullOrWhiteSpace("$(Get-StateProperty -State $existingState -Name 'version')")) { "$(Get-StateProperty -State $existingState -Name 'version')" } else { $null })
+            SupportRoot              = $packSupportRoot
+            ManifestPath             = $manifestPath
+            Manifest                 = $manifest
+            ArchivePath              = Resolve-WorkflowPackArchivePath -ExistingState $existingState -Manifest $manifest -SupportRoot $packSupportRoot
+            BuildMetadataPath        = Resolve-WorkflowPackBuildMetadataPath -ExistingState $existingState -SupportRoot $packSupportRoot
+            SourceLockPath           = Resolve-WorkflowPackSourceLockPath -ExistingState $existingState -SupportRoot $packSupportRoot
+            RuntimeRoot              = $(if (-not [string]::IsNullOrWhiteSpace("$(Get-StateProperty -State $existingState -Name 'runtimeRoot')")) { "$(Get-StateProperty -State $existingState -Name 'runtimeRoot')" } else { Join-Path $script:Context.DataRoot ("workflow-packs\{0}\runtime" -f $packId) })
+            SavedBuildMetadataSha256 = Get-StateProperty -State $existingState -Name "buildMetadataSha256"
+            SavedSourceLockSha256    = Get-StateProperty -State $existingState -Name "sourceLockSha256"
             ExistingState = $existingState
         }) | Out-Null
     }
@@ -1274,20 +1562,160 @@ function Resolve-InstalledWorkflowPacks {
 
             Add-UniqueString -List $seenPackIds -Value $packId
             $resolved.Add([pscustomobject]@{
-                PackId       = $packId
-                DisplayName  = $(if ($manifest -and -not [string]::IsNullOrWhiteSpace("$($manifest.displayName)")) { "$($manifest.displayName)" } else { $packId })
-                PluginId     = $(if ($manifest -and -not [string]::IsNullOrWhiteSpace("$($manifest.pluginId)")) { "$($manifest.pluginId)" } else { $packId })
-                Version      = $(if ($manifest -and -not [string]::IsNullOrWhiteSpace("$($manifest.version)")) { "$($manifest.version)" } else { $null })
-                SupportRoot  = $supportDirectory.FullName
-                ManifestPath = $manifestPath
-                Manifest     = $manifest
-                ArchivePath  = Resolve-WorkflowPackArchivePath -ExistingState $null -Manifest $manifest -SupportRoot $supportDirectory.FullName
+                PackId                   = $packId
+                DisplayName              = $(if ($manifest -and -not [string]::IsNullOrWhiteSpace("$($manifest.displayName)")) { "$($manifest.displayName)" } else { $packId })
+                PluginId                 = $(if ($manifest -and -not [string]::IsNullOrWhiteSpace("$($manifest.pluginId)")) { "$($manifest.pluginId)" } else { $packId })
+                Version                  = $(if ($manifest -and -not [string]::IsNullOrWhiteSpace("$($manifest.version)")) { "$($manifest.version)" } else { $null })
+                SupportRoot              = $supportDirectory.FullName
+                ManifestPath             = $manifestPath
+                Manifest                 = $manifest
+                ArchivePath              = Resolve-WorkflowPackArchivePath -ExistingState $null -Manifest $manifest -SupportRoot $supportDirectory.FullName
+                BuildMetadataPath        = Resolve-WorkflowPackBuildMetadataPath -ExistingState $null -SupportRoot $supportDirectory.FullName
+                SourceLockPath           = Resolve-WorkflowPackSourceLockPath -ExistingState $null -SupportRoot $supportDirectory.FullName
+                RuntimeRoot              = Join-Path $script:Context.DataRoot ("workflow-packs\{0}\runtime" -f $packId)
+                SavedBuildMetadataSha256 = $null
+                SavedSourceLockSha256    = $null
                 ExistingState = $null
             }) | Out-Null
         }
     }
 
     return @($resolved.ToArray())
+}
+
+function Invoke-WorkflowPackBuildMetadataVerification {
+    param([object]$WorkflowPack)
+
+    $checks = New-Object System.Collections.Generic.List[object]
+    $requiresLockedMetadata = Test-WorkflowPackRequiresLockedMetadata -WorkflowPack $WorkflowPack
+    $observedSha256 = Get-FileSha256 -Path $WorkflowPack.BuildMetadataPath
+    $buildMetadata = $null
+
+    if ([string]::IsNullOrWhiteSpace("$($WorkflowPack.BuildMetadataPath)")) {
+        if ($requiresLockedMetadata) {
+            $checks.Add((New-WorkflowPackCheckResult -Name "Build metadata" -Summary "Workflow pack build metadata is missing from the support directory." -ExitCode 1 -Category "metadata" -Severity "error")) | Out-Null
+        }
+
+        return [pscustomobject]@{
+            Checks         = @($checks.ToArray())
+            BuildMetadata  = $null
+            ObservedSha256 = $null
+        }
+    }
+
+    if ($null -eq $observedSha256) {
+        if (-not $requiresLockedMetadata) {
+            return [pscustomobject]@{
+                Checks         = @($checks.ToArray())
+                BuildMetadata  = $null
+                ObservedSha256 = $null
+            }
+        }
+
+        $checks.Add((New-WorkflowPackCheckResult -Name "Build metadata" -Summary "Workflow pack build metadata path does not point to a readable file." -ExitCode 1 -Category "metadata" -Severity "error")) | Out-Null
+        return [pscustomobject]@{
+            Checks         = @($checks.ToArray())
+            BuildMetadata  = $null
+            ObservedSha256 = $null
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace("$($WorkflowPack.SavedBuildMetadataSha256)") -and "$($WorkflowPack.SavedBuildMetadataSha256)".ToLowerInvariant() -ne "$observedSha256".ToLowerInvariant()) {
+        $checks.Add((New-WorkflowPackCheckResult -Name "Build metadata" -Summary "Workflow pack build metadata digest drift was detected." -ExitCode 1 -Category "metadata" -Severity "error")) | Out-Null
+    } else {
+        $checks.Add((New-WorkflowPackCheckResult -Name "Build metadata" -Summary "Workflow pack build metadata is present." -Category "metadata" -Severity "info")) | Out-Null
+    }
+
+    $buildMetadata = Read-JsonFileSafe -Path $WorkflowPack.BuildMetadataPath
+    if ($null -eq $buildMetadata) {
+        $checks.Add((New-WorkflowPackCheckResult -Name "Build metadata" -Summary "Workflow pack build metadata could not be parsed." -ExitCode 1 -Category "metadata" -Severity "error")) | Out-Null
+    }
+
+    return [pscustomobject]@{
+        Checks         = @($checks.ToArray())
+        BuildMetadata  = $buildMetadata
+        ObservedSha256 = $observedSha256
+    }
+}
+
+function Invoke-WorkflowPackSourceLockVerification {
+    param([object]$WorkflowPack)
+
+    $checks = New-Object System.Collections.Generic.List[object]
+    $requiredSourceFailures = New-Object System.Collections.Generic.List[object]
+    $requiresLockedMetadata = Test-WorkflowPackRequiresLockedMetadata -WorkflowPack $WorkflowPack
+    $observedSha256 = Get-FileSha256 -Path $WorkflowPack.SourceLockPath
+    $sourceLock = $null
+
+    if ([string]::IsNullOrWhiteSpace("$($WorkflowPack.SourceLockPath)")) {
+        if ($requiresLockedMetadata) {
+            $checks.Add((New-WorkflowPackCheckResult -Name "Source lock" -Summary "Workflow pack source lock is missing from the support directory." -ExitCode 1 -Category "source-lock" -Severity "error")) | Out-Null
+        }
+
+        return [pscustomobject]@{
+            Checks                 = @($checks.ToArray())
+            SourceLock             = $null
+            RequiredSourceFailures = @($requiredSourceFailures.ToArray())
+            ObservedSha256         = $null
+        }
+    }
+
+    if ($null -eq $observedSha256) {
+        if (-not $requiresLockedMetadata) {
+            return [pscustomobject]@{
+                Checks                 = @($checks.ToArray())
+                SourceLock             = $null
+                RequiredSourceFailures = @($requiredSourceFailures.ToArray())
+                ObservedSha256         = $null
+            }
+        }
+
+        $checks.Add((New-WorkflowPackCheckResult -Name "Source lock" -Summary "Workflow pack source lock path does not point to a readable file." -ExitCode 1 -Category "source-lock" -Severity "error")) | Out-Null
+        return [pscustomobject]@{
+            Checks                 = @($checks.ToArray())
+            SourceLock             = $null
+            RequiredSourceFailures = @($requiredSourceFailures.ToArray())
+            ObservedSha256         = $null
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace("$($WorkflowPack.SavedSourceLockSha256)") -and "$($WorkflowPack.SavedSourceLockSha256)".ToLowerInvariant() -ne "$observedSha256".ToLowerInvariant()) {
+        $checks.Add((New-WorkflowPackCheckResult -Name "Source lock" -Summary "Workflow pack source lock digest drift was detected." -ExitCode 1 -Category "source-lock" -Severity "error")) | Out-Null
+    } else {
+        $checks.Add((New-WorkflowPackCheckResult -Name "Source lock" -Summary "Workflow pack source lock is present." -Category "source-lock" -Severity "info")) | Out-Null
+    }
+
+    $sourceLock = Read-JsonFileSafe -Path $WorkflowPack.SourceLockPath
+    if ($null -eq $sourceLock) {
+        $checks.Add((New-WorkflowPackCheckResult -Name "Source lock" -Summary "Workflow pack source lock could not be parsed." -ExitCode 1 -Category "source-lock" -Severity "error")) | Out-Null
+        return [pscustomobject]@{
+            Checks                 = @($checks.ToArray())
+            SourceLock             = $null
+            RequiredSourceFailures = @($requiredSourceFailures.ToArray())
+            ObservedSha256         = $observedSha256
+        }
+    }
+
+    foreach ($entry in @(Convert-ToArray -Value (Get-StateProperty -State $sourceLock -Name "sources"))) {
+        $isRequired = [bool](Get-StateProperty -State $entry -Name "required" -Default $false)
+        $status = "$(Get-StateProperty -State $entry -Name 'status')"
+        if ($isRequired -and $status -ne "resolved") {
+            $skillId = "$(Get-StateProperty -State $entry -Name 'skillId')"
+            $summary = "$(Get-StateProperty -State $entry -Name 'summary' -Default 'Required skill source is not resolved.')"
+            $requiredSourceFailures.Add([pscustomobject]@{
+                skillId = $skillId
+                summary = $summary
+            }) | Out-Null
+            $checks.Add((New-WorkflowPackCheckResult -Name ("Source lock: {0}" -f $skillId) -Summary $summary -ExitCode 1 -Category "source-lock" -Severity "error")) | Out-Null
+        }
+    }
+
+    return [pscustomobject]@{
+        Checks                 = @($checks.ToArray())
+        SourceLock             = $sourceLock
+        RequiredSourceFailures = @($requiredSourceFailures.ToArray())
+        ObservedSha256         = $observedSha256
+    }
 }
 
 function Invoke-WorkflowPackVerification {
@@ -1297,45 +1725,86 @@ function Invoke-WorkflowPackVerification {
         return [pscustomobject]@{
             Success = $false
             Summary = "Workflow pack plugin id is missing."
+            RepairAllowed = $false
+            Readiness = [pscustomobject]@{
+                status = "needs-attention"
+                summary = "Workflow pack plugin id is missing."
+                unresolvedRequiredSkills = @()
+                integrityIssues = @()
+                provisioningFailures = @()
+                blockingPrerequisites = @()
+                warningPrerequisites = @()
+            }
+            Provisioning = @()
+            Prerequisites = @()
+            ObservedBuildMetadataSha256 = $null
+            ObservedSourceLockSha256 = $null
             Checks  = @(
-                [pscustomobject]@{
-                    name      = "plugin id"
-                    exitCode  = 1
-                    timedOut  = $false
-                    summary   = "Workflow pack plugin id is missing."
-                    arguments = @()
-                }
+                (New-WorkflowPackCheckResult -Name "plugin id" -Summary "Workflow pack plugin id is missing." -ExitCode 1 -Category "metadata" -Severity "error")
             )
         }
     }
 
+    $buildMetadataVerification = Invoke-WorkflowPackBuildMetadataVerification -WorkflowPack $WorkflowPack
+    $sourceLockVerification = Invoke-WorkflowPackSourceLockVerification -WorkflowPack $WorkflowPack
+    $provisioningResults = @(Invoke-WorkflowPackProvisioningVerification -WorkflowPack $WorkflowPack)
+    $prerequisiteResults = @(Invoke-WorkflowPackPrerequisiteVerification -WorkflowPack $WorkflowPack)
     $checks = New-Object System.Collections.Generic.List[object]
+    foreach ($result in @($buildMetadataVerification.Checks + $sourceLockVerification.Checks)) {
+        $checks.Add($result) | Out-Null
+    }
+    foreach ($provisioning in @($provisioningResults)) {
+        $checks.Add((New-WorkflowPackCheckResult -Name ("Provisioning: {0}" -f $provisioning.type) -Summary $provisioning.summary -ExitCode $(if ($provisioning.success) { 0 } else { 1 }) -Category "provisioning" -Severity "error")) | Out-Null
+    }
+    foreach ($prerequisite in @($prerequisiteResults)) {
+        $checks.Add((New-WorkflowPackCheckResult -Name ("Prerequisite: {0}" -f $prerequisite.id) -Summary $prerequisite.summary -ExitCode $(if ($prerequisite.success -or $prerequisite.severity -ne "error") { 0 } else { 1 }) -Category "readiness" -Severity $prerequisite.severity)) | Out-Null
+    }
+
     foreach ($check in @(
         [pscustomobject]@{ Name = "Plugin info"; Arguments = @("plugins", "info", "$($WorkflowPack.PluginId)"); TimeoutSeconds = 45 },
         [pscustomobject]@{ Name = "Plugins doctor"; Arguments = @("plugins", "doctor"); TimeoutSeconds = 120 },
         [pscustomobject]@{ Name = "Skills check"; Arguments = @("skills", "check"); TimeoutSeconds = 120 }
     )) {
         $result = Invoke-OpenClaw -Arguments $check.Arguments -TimeoutSeconds $check.TimeoutSeconds
-        $checks.Add([pscustomobject]@{
-            name      = $check.Name
-            exitCode  = $result.ExitCode
-            timedOut  = [bool]$result.TimedOut
-            summary   = Get-CommandResultSummary -Result $result
-            arguments = @($check.Arguments)
-        }) | Out-Null
+        $checks.Add((New-WorkflowPackCheckResult -Name $check.Name -Summary (Get-CommandResultSummary -Result $result) -ExitCode $result.ExitCode -TimedOut ([bool]$result.TimedOut) -Arguments @($check.Arguments) -Category "plugin-health" -Severity "error" -Repairable $true)) | Out-Null
     }
 
+    $integrityIssues = @(
+        @($buildMetadataVerification.Checks + $sourceLockVerification.Checks) |
+            Where-Object { $_.timedOut -or $_.exitCode -ne 0 } |
+            ForEach-Object {
+                [pscustomobject]@{
+                    name = $_.name
+                    summary = $_.summary
+                }
+            }
+    )
+    $readiness = Get-WorkflowPackReadinessState `
+        -RequiredSourceFailures @($sourceLockVerification.RequiredSourceFailures) `
+        -ProvisioningResults @($provisioningResults) `
+        -PrerequisiteResults @($prerequisiteResults) `
+        -IntegrityIssues @($integrityIssues)
+
     $failedChecks = @($checks | Where-Object { $_.timedOut -or $_.exitCode -ne 0 })
+    $repairBlockedChecks = @($failedChecks | Where-Object { -not $_.repairable })
     $summary = if ($failedChecks.Count -gt 0) {
         "$($failedChecks[0].name): $($failedChecks[0].summary)"
+    } elseif ($readiness.status -eq "warning") {
+        $readiness.summary
     } else {
         "Workflow pack verification passed."
     }
 
     return [pscustomobject]@{
-        Success = ($failedChecks.Count -eq 0)
-        Summary = $summary
-        Checks  = $checks.ToArray()
+        Success                    = ($failedChecks.Count -eq 0)
+        Summary                    = $summary
+        RepairAllowed              = ($failedChecks.Count -gt 0 -and $repairBlockedChecks.Count -eq 0)
+        Checks                     = $checks.ToArray()
+        Provisioning               = @($provisioningResults)
+        Prerequisites              = @($prerequisiteResults)
+        Readiness                  = $readiness
+        ObservedBuildMetadataSha256 = $buildMetadataVerification.ObservedSha256
+        ObservedSourceLockSha256    = $sourceLockVerification.ObservedSha256
     }
 }
 
@@ -1408,14 +1877,26 @@ function New-WorkflowPackStateSnapshot {
     $payload.pluginId = $WorkflowPack.PluginId
     $payload.archivePath = $WorkflowPack.ArchivePath
     $payload.manifestPath = $WorkflowPack.ManifestPath
+    $payload.buildMetadataPath = $WorkflowPack.BuildMetadataPath
+    $payload.buildMetadataSha256 = $(if (-not [string]::IsNullOrWhiteSpace("$($WorkflowPack.SavedBuildMetadataSha256)")) { "$($WorkflowPack.SavedBuildMetadataSha256)" } else { $Verification.ObservedBuildMetadataSha256 })
+    $payload.lastObservedBuildMetadataSha256 = $Verification.ObservedBuildMetadataSha256
+    $payload.sourceLockPath = $WorkflowPack.SourceLockPath
+    $payload.sourceLockSha256 = $(if (-not [string]::IsNullOrWhiteSpace("$($WorkflowPack.SavedSourceLockSha256)")) { "$($WorkflowPack.SavedSourceLockSha256)" } else { $Verification.ObservedSourceLockSha256 })
+    $payload.lastObservedSourceLockSha256 = $Verification.ObservedSourceLockSha256
     $payload.supportRoot = $WorkflowPack.SupportRoot
+    $payload.runtimeRoot = $WorkflowPack.RuntimeRoot
     $payload.installed = [bool]$Verification.Success
     $payload.installedAt = $installedAt
     $payload.verifiedAt = (Get-Date).ToString("o")
     $payload.verification = @($Verification.Checks)
+    $payload.provisioning = @($Verification.Provisioning)
+    $payload.prerequisites = @($Verification.Prerequisites)
+    $payload.readiness = $Verification.Readiness
     $payload.lastVerification = [pscustomobject]@{
         success = [bool]$Verification.Success
         summary = $Verification.Summary
+        repairAllowed = [bool]$Verification.RepairAllowed
+        readiness = $Verification.Readiness
         checks  = @($Verification.Checks)
     }
     $payload.lastRepair = [pscustomobject]@{
@@ -1467,10 +1948,19 @@ function Invoke-WorkflowPackMaintenance {
             ArchiveMissing = $false
         }
 
-        if (-not $initialVerification.Success) {
+        if (-not $initialVerification.Success -and $initialVerification.RepairAllowed) {
             $repair = Invoke-WorkflowPackSelfHeal -WorkflowPack $workflowPack
             if ($repair.Attempted) {
                 $finalVerification = Invoke-WorkflowPackVerification -WorkflowPack $workflowPack
+            }
+        } elseif (-not $initialVerification.Success) {
+            $repair = [pscustomobject]@{
+                Attempted      = $false
+                Success        = $false
+                Summary        = "Workflow pack verification found metadata, source lock, provisioning, or readiness drift that maintenance will not overwrite."
+                Actions        = @()
+                AttemptedAt    = $null
+                ArchiveMissing = $false
             }
         }
 
