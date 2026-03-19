@@ -15,7 +15,11 @@ param(
     [string]$XreachVersion = "0.3.3",
     [string]$McporterVersion = "0.7.3",
     [string]$UndiciVersion = "7.24.3",
+    [string]$SkillsCliVersion = "1.4.5",
+    [string]$AgentBrowserVersion = "0.21.2",
+    [string]$JqVersion = "1.8.1",
     [string]$NpmRegistry = "https://registry.npmjs.org/",
+    [switch]$AllowUnresolvedSkillSources,
     [switch]$KeepIntermediate,
     [switch]$DryRun
 )
@@ -78,6 +82,39 @@ function Read-JsonFile {
     }
 
     return (Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json)
+}
+
+function Convert-ToArray {
+    param([object]$Value)
+
+    if ($null -eq $Value) {
+        return @()
+    }
+
+    return @($Value)
+}
+
+function Get-ObjectPropertyValue {
+    param(
+        [object]$Object,
+        [string]$Name,
+        $Default = $null
+    )
+
+    if ($null -eq $Object) {
+        return $Default
+    }
+
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property) {
+        return $Default
+    }
+
+    if ($null -eq $property.Value) {
+        return $Default
+    }
+
+    return $property.Value
 }
 
 function Remove-FileWithRetry {
@@ -475,7 +512,8 @@ function Prepare-PortableNode {
     param(
         [string]$DownloadDir,
         [string]$WorkRoot,
-        [string]$DestinationRoot
+        [string]$DestinationRoot,
+        [object[]]$NodePackages
     )
 
     $arch = Get-ArchitectureDescriptor
@@ -514,12 +552,21 @@ function Prepare-PortableNode {
         $env:NPM_CONFIG_UPDATE_NOTIFIER = "false"
         $env:NPM_CONFIG_SCRIPT_SHELL = "cmd.exe"
 
-        Invoke-External -FilePath $npmCmd -Arguments @(
+        $packageSpecs = New-Object System.Collections.Generic.List[string]
+        foreach ($package in @(Convert-ToArray -Value $NodePackages)) {
+            $packageName = Get-ObjectPropertyValue -Object $package -Name "name"
+            $packageVersion = Get-ObjectPropertyValue -Object $package -Name "version"
+            if ([string]::IsNullOrWhiteSpace("$packageName") -or [string]::IsNullOrWhiteSpace("$packageVersion")) {
+                Write-Err "Each node runtime package must define name and version."
+            }
+
+            $packageSpecs.Add(("{0}@{1}" -f $packageName, $packageVersion)) | Out-Null
+        }
+
+        Invoke-External -FilePath $npmCmd -Arguments (@(
             "install",
-            "-g",
-            ("xreach-cli@{0}" -f $XreachVersion),
-            ("mcporter@{0}" -f $McporterVersion),
-            ("undici@{0}" -f $UndiciVersion),
+            "-g"
+        ) + $packageSpecs.ToArray() + @(
             "--prefix",
             $DestinationRoot,
             "--loglevel",
@@ -528,7 +575,7 @@ function Prepare-PortableNode {
             "false",
             "--audit",
             "false"
-        ) -WorkingDirectory $DestinationRoot
+        )) -WorkingDirectory $DestinationRoot
     } finally {
         $env:npm_config_cache = $previousCache
         $env:npm_config_registry = $previousRegistry
@@ -539,10 +586,165 @@ function Prepare-PortableNode {
         $env:NPM_CONFIG_SCRIPT_SHELL = $previousShell
     }
 
-    foreach ($required in @("node.exe", "npm.cmd", "xreach.cmd", "mcporter.cmd")) {
-        if (-not (Test-Path -LiteralPath (Join-Path $DestinationRoot $required))) {
-            Write-Err ("Portable Node payload is missing {0}: {1}" -f $required, $DestinationRoot)
+    $requiredPaths = New-Object System.Collections.Generic.List[string]
+    foreach ($entry in @("node.exe", "npm.cmd")) {
+        $requiredPaths.Add($entry) | Out-Null
+    }
+    foreach ($package in @(Convert-ToArray -Value $NodePackages)) {
+        $commandName = Get-ObjectPropertyValue -Object $package -Name "command"
+        if (-not [string]::IsNullOrWhiteSpace("$commandName")) {
+            $requiredPaths.Add(("{0}.cmd" -f $commandName)) | Out-Null
         }
+    }
+
+    foreach ($requiredPath in @($requiredPaths.ToArray())) {
+        if (-not (Test-Path -LiteralPath (Join-Path $DestinationRoot $requiredPath))) {
+            Write-Err ("Portable Node payload is missing {0}: {1}" -f $requiredPath, $DestinationRoot)
+        }
+    }
+}
+
+function Prepare-JqTool {
+    param(
+        [string]$DownloadDir,
+        [string]$DestinationRoot
+    )
+
+    $fileName = "jq-{0}.exe" -f $JqVersion
+    $downloadPath = Join-Path $DownloadDir $fileName
+    $url = "https://github.com/jqlang/jq/releases/download/jq-{0}/jq-windows-amd64.exe" -f $JqVersion
+
+    Download-File -Url $url -Destination $downloadPath
+    Ensure-Directory -Path $DestinationRoot
+    if (-not $DryRun) {
+        Copy-Item -LiteralPath $downloadPath -Destination (Join-Path $DestinationRoot "jq.exe") -Force
+    }
+
+    if (-not $DryRun -and -not (Test-Path -LiteralPath (Join-Path $DestinationRoot "jq.exe"))) {
+        Write-Err ("Portable jq did not contain jq.exe: {0}" -f $DestinationRoot)
+    }
+}
+
+function Get-DefaultNodeRuntimePackages {
+    param([object]$RuntimeSpec)
+
+    $packages = New-Object System.Collections.Generic.List[object]
+    foreach ($package in @(
+        [pscustomobject]@{ name = "xreach-cli"; version = $XreachVersion; command = "xreach" },
+        [pscustomobject]@{ name = "mcporter"; version = $McporterVersion; command = "mcporter" },
+        [pscustomobject]@{ name = "undici"; version = $UndiciVersion }
+    )) {
+        $packages.Add($package) | Out-Null
+    }
+
+    if ("$((Get-ObjectPropertyValue -Object $RuntimeSpec -Name 'key'))" -eq "foundation-runtime") {
+        $packages.Add([pscustomobject]@{ name = "skills"; version = $SkillsCliVersion; command = "skills" }) | Out-Null
+        $packages.Add([pscustomobject]@{ name = "agent-browser"; version = $AgentBrowserVersion; command = "agent-browser" }) | Out-Null
+    }
+
+    return @($packages.ToArray())
+}
+
+function Resolve-NodeRuntimePackages {
+    param([object]$RuntimeSpec)
+
+    $packages = @(Convert-ToArray -Value (Get-ObjectPropertyValue -Object $RuntimeSpec -Name "nodePackages"))
+    if ($packages.Count -gt 0) {
+        return $packages
+    }
+
+    return (Get-DefaultNodeRuntimePackages -RuntimeSpec $RuntimeSpec)
+}
+
+function Runtime-RequiresAgentReachPython {
+    param([object]$RuntimeSpec)
+
+    $runtimeKey = "$((Get-ObjectPropertyValue -Object $RuntimeSpec -Name 'key'))"
+    $commands = @(
+        @(Convert-ToArray -Value (Get-ObjectPropertyValue -Object $RuntimeSpec -Name "commands")) |
+            ForEach-Object { "$_" }
+    )
+
+    return ($runtimeKey -eq "agent-reach" -or $runtimeKey -eq "foundation-runtime" -or @($commands | Where-Object { $_ -ieq "agent-reach" }).Count -gt 0)
+}
+
+function Runtime-RequiresJq {
+    param([object]$RuntimeSpec)
+
+    foreach ($tool in @(Convert-ToArray -Value (Get-ObjectPropertyValue -Object $RuntimeSpec -Name "tools"))) {
+        if ("$(Get-ObjectPropertyValue -Object $tool -Name 'name')" -ieq "jq") {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Prepare-WorkflowRuntime {
+    param(
+        [object]$RuntimeSpec,
+        [string]$DownloadDir,
+        [string]$WorkRoot,
+        [string]$RuntimeRoot
+    )
+
+    $toolsRoot = Join-Path $RuntimeRoot "tools"
+    $nodePackages = Resolve-NodeRuntimePackages -RuntimeSpec $RuntimeSpec
+    $pythonMetadata = [pscustomobject]@{
+        AgentReachVersion = $null
+    }
+
+    if (-not $DryRun) {
+        Prepare-PortableGit -DownloadDir $DownloadDir -DestinationRoot (Join-Path $toolsRoot "git")
+        Prepare-GitHubCli -DownloadDir $DownloadDir -DestinationRoot (Join-Path $toolsRoot "gh")
+        Prepare-PortableNode -DownloadDir $DownloadDir -WorkRoot $WorkRoot -DestinationRoot (Join-Path $toolsRoot "node") -NodePackages $nodePackages
+        if (Runtime-RequiresAgentReachPython -RuntimeSpec $RuntimeSpec) {
+            $pythonMetadata = Prepare-PortablePython -DownloadDir $DownloadDir -WorkRoot $WorkRoot -DestinationRoot (Join-Path $toolsRoot "python")
+        }
+        if (Runtime-RequiresJq -RuntimeSpec $RuntimeSpec) {
+            Prepare-JqTool -DownloadDir $DownloadDir -DestinationRoot (Join-Path $toolsRoot "jq")
+        }
+    }
+
+    $nodePackageVersions = New-Object System.Collections.Generic.List[object]
+    foreach ($package in @($nodePackages)) {
+        $packageName = "$((Get-ObjectPropertyValue -Object $package -Name 'name'))"
+        $packageVersion = if ($DryRun) {
+            "$((Get-ObjectPropertyValue -Object $package -Name 'version'))"
+        } else {
+            Read-PackageVersion -PackageJsonPath (Join-Path $toolsRoot ("node\node_modules\{0}\package.json" -f $packageName))
+        }
+
+        $nodePackageVersions.Add([pscustomobject]@{
+            name = $packageName
+            version = $packageVersion
+            command = $(Get-ObjectPropertyValue -Object $package -Name "command")
+        }) | Out-Null
+    }
+
+    return [pscustomobject]@{
+        key = "$((Get-ObjectPropertyValue -Object $RuntimeSpec -Name 'key'))"
+        layout = "$((Get-ObjectPropertyValue -Object $RuntimeSpec -Name 'layout'))"
+        pythonVersion = $(if (Runtime-RequiresAgentReachPython -RuntimeSpec $RuntimeSpec) { $PythonVersion } else { $null })
+        nodeVersion = $NodeVersion
+        gitHubCliVersion = $GitHubCliVersion
+        minGitVersion = $MinGitVersion
+        agentReachTag = $(if (Runtime-RequiresAgentReachPython -RuntimeSpec $RuntimeSpec) { $AgentReachTag } else { $null })
+        agentReachVersion = $pythonMetadata.AgentReachVersion
+        jqVersion = $(if (Runtime-RequiresJq -RuntimeSpec $RuntimeSpec) { $JqVersion } else { $null })
+        nodePackages = @($nodePackageVersions.ToArray())
+    }
+}
+
+function Get-WorkflowPackMetadataArtifactPaths {
+    param(
+        [string]$ArchiveOutputDir,
+        [string]$ResolvedPackId
+    )
+
+    return [pscustomobject]@{
+        BuildMetadataPath = Join-Path $ArchiveOutputDir ("workflow-pack-build-metadata-{0}.json" -f $ResolvedPackId)
+        SourceLockPath = Join-Path $ArchiveOutputDir ("workflow-pack-source-lock-{0}.json" -f $ResolvedPackId)
     }
 }
 
@@ -658,13 +860,25 @@ function Build-WorkflowPluginArchive {
 
     Ensure-Directory -Path $ArchiveOutputDir
     $archivePath = Join-Path $ArchiveOutputDir "$($WorkflowPack.Manifest.archiveName)"
-    & $builderScript -PackId "$($WorkflowPack.Manifest.packId)" -OutputDir $ArchiveOutputDir -OutputName "$($WorkflowPack.Manifest.archiveName)" -DryRun:$DryRun
+    $artifactPaths = Get-WorkflowPackMetadataArtifactPaths -ArchiveOutputDir $ArchiveOutputDir -ResolvedPackId "$($WorkflowPack.Manifest.packId)"
+    & $builderScript `
+        -PackId "$($WorkflowPack.Manifest.packId)" `
+        -OutputDir $ArchiveOutputDir `
+        -OutputName "$($WorkflowPack.Manifest.archiveName)" `
+        -OutputMetadataPath $artifactPaths.BuildMetadataPath `
+        -OutputSourceLockPath $artifactPaths.SourceLockPath `
+        -AllowUnresolvedSkillSources:$AllowUnresolvedSkillSources `
+        -DryRun:$DryRun
 
     if (-not $DryRun -and -not (Test-Path -LiteralPath $archivePath)) {
         Write-Err ("Workflow pack archive was not produced: {0}" -f $archivePath)
     }
 
-    return $archivePath
+    return [pscustomobject]@{
+        ArchivePath = $archivePath
+        BuildMetadataPath = $artifactPaths.BuildMetadataPath
+        SourceLockPath = $artifactPaths.SourceLockPath
+    }
 }
 
 function Get-EmbeddedLauncherSource {
@@ -1419,11 +1633,12 @@ function Build-WorkflowPackInstaller {
     $workRoot = Join-Path $script:BuildRoot "work"
     $stageDir = Join-Path $script:BuildRoot "stage"
     $runtimeRoot = Join-Path $stageDir "runtime"
-    $pluginArchivePath = Build-WorkflowPluginArchive -WorkflowPack $workflowPack -ArchiveOutputDir $pluginArchiveDir
+    $pluginBuildArtifacts = Build-WorkflowPluginArchive -WorkflowPack $workflowPack -ArchiveOutputDir $pluginArchiveDir
     $runtimeSpec = $workflowPack.Manifest.runtime
-    $requiresAgentReachRuntime = ($null -ne $runtimeSpec -and "$($runtimeSpec.key)" -eq "agent-reach" -and "$($runtimeSpec.layout)" -eq "agent-reach-v1")
+    $runtimeKey = "$((Get-ObjectPropertyValue -Object $runtimeSpec -Name 'key'))"
+    $requiresWorkflowRuntime = (-not [string]::IsNullOrWhiteSpace($runtimeKey))
 
-    foreach ($path in @($downloadDir, $pluginArchiveDir, $workRoot, $stageDir, $(if ($requiresAgentReachRuntime) { $runtimeRoot } else { $null }))) {
+    foreach ($path in @($downloadDir, $pluginArchiveDir, $workRoot, $stageDir, $(if ($requiresWorkflowRuntime) { $runtimeRoot } else { $null }))) {
         Ensure-Directory -Path $path
     }
 
@@ -1439,36 +1654,9 @@ function Build-WorkflowPackInstaller {
         runtimeLayout = $(if ($runtimeSpec) { "$($runtimeSpec.layout)" } else { $null })
     }
 
-    if ($requiresAgentReachRuntime) {
+    if ($requiresWorkflowRuntime) {
         Write-Info ("Preparing offline workflow runtime for pack '{0}' ({1})" -f $workflowPack.Manifest.packId, $Architecture)
-        $toolsRoot = Join-Path $runtimeRoot "tools"
-        $pythonMetadata = [pscustomobject]@{
-            AgentReachVersion = $null
-        }
-
-        if (-not $DryRun) {
-            Prepare-PortableGit -DownloadDir $downloadDir -DestinationRoot (Join-Path $toolsRoot "git")
-            Prepare-GitHubCli -DownloadDir $downloadDir -DestinationRoot (Join-Path $toolsRoot "gh")
-            Prepare-PortableNode -DownloadDir $downloadDir -WorkRoot $workRoot -DestinationRoot (Join-Path $toolsRoot "node")
-            $pythonMetadata = Prepare-PortablePython `
-                -DownloadDir $downloadDir `
-                -WorkRoot $workRoot `
-                -DestinationRoot (Join-Path $toolsRoot "python")
-        }
-
-        $manifest.runtime = [ordered]@{
-            key = "$($runtimeSpec.key)"
-            layout = "$($runtimeSpec.layout)"
-            pythonVersion = $PythonVersion
-            nodeVersion = $NodeVersion
-            gitHubCliVersion = $GitHubCliVersion
-            minGitVersion = $MinGitVersion
-            agentReachTag = $AgentReachTag
-            agentReachVersion = $pythonMetadata.AgentReachVersion
-            xreachVersion = if ($DryRun) { $XreachVersion } else { Read-PackageVersion -PackageJsonPath (Join-Path $toolsRoot "node\node_modules\xreach-cli\package.json") }
-            mcporterVersion = if ($DryRun) { $McporterVersion } else { Read-PackageVersion -PackageJsonPath (Join-Path $toolsRoot "node\node_modules\mcporter\package.json") }
-            undiciVersion = if ($DryRun) { $UndiciVersion } else { Read-PackageVersion -PackageJsonPath (Join-Path $toolsRoot "node\node_modules\undici\package.json") }
-        }
+        $manifest.runtime = Prepare-WorkflowRuntime -RuntimeSpec $runtimeSpec -DownloadDir $downloadDir -WorkRoot $workRoot -RuntimeRoot $runtimeRoot
     } elseif ($null -ne $runtimeSpec -and -not [string]::IsNullOrWhiteSpace("$($runtimeSpec.key)")) {
         Write-Warn ("Workflow pack runtime '{0}' is declared but not handled by this installer builder yet. The EXE will only include the plugin archive." -f $runtimeSpec.key)
     }
@@ -1477,8 +1665,16 @@ function Build-WorkflowPackInstaller {
 
     if (-not $DryRun) {
         Copy-Item -LiteralPath $workflowPack.ManifestPath -Destination (Join-Path $stageDir "pack-manifest.json") -Force
-        Copy-Item -LiteralPath $pluginArchivePath -Destination (Join-Path $stageDir "$($workflowPack.Manifest.archiveName)") -Force
-        Copy-Item -LiteralPath $pluginArchivePath -Destination (Join-Path $effectiveOutputDir "$($workflowPack.Manifest.archiveName)") -Force
+        Copy-Item -LiteralPath $pluginBuildArtifacts.ArchivePath -Destination (Join-Path $stageDir "$($workflowPack.Manifest.archiveName)") -Force
+        Copy-Item -LiteralPath $pluginBuildArtifacts.ArchivePath -Destination (Join-Path $effectiveOutputDir "$($workflowPack.Manifest.archiveName)") -Force
+        if (Test-Path -LiteralPath $pluginBuildArtifacts.BuildMetadataPath) {
+            Copy-Item -LiteralPath $pluginBuildArtifacts.BuildMetadataPath -Destination (Join-Path $stageDir "workflow-pack-build-metadata.json") -Force
+            Copy-Item -LiteralPath $pluginBuildArtifacts.BuildMetadataPath -Destination (Join-Path $effectiveOutputDir ([IO.Path]::GetFileName($pluginBuildArtifacts.BuildMetadataPath))) -Force
+        }
+        if (Test-Path -LiteralPath $pluginBuildArtifacts.SourceLockPath) {
+            Copy-Item -LiteralPath $pluginBuildArtifacts.SourceLockPath -Destination (Join-Path $stageDir "workflow-pack-source-lock.json") -Force
+            Copy-Item -LiteralPath $pluginBuildArtifacts.SourceLockPath -Destination (Join-Path $effectiveOutputDir ([IO.Path]::GetFileName($pluginBuildArtifacts.SourceLockPath))) -Force
+        }
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot "install-windows-workflow-pack.ps1") -Destination (Join-Path $stageDir "install-windows-workflow-pack.ps1") -Force
     }
     [void](New-RunInstallCmd -StageDir $stageDir)

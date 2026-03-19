@@ -20,18 +20,27 @@ $script:Installer = [ordered]@{
     PackManifestPath = $null
     Manifest = $null
     PackArchivePath = $null
+    BuildMetadataPath = $null
+    SourceLockPath = $null
+    BuildMetadata = $null
+    SourceLock = $null
     RuntimeSourceRoot = $null
     OpenClawRoot = $null
     InstallStatePath = $null
     SupportRoot = $null
     SupportArchivePath = $null
     SupportManifestPath = $null
+    SupportBuildMetadataPath = $null
+    SupportSourceLockPath = $null
     RuntimeRoot = $null
     BinDir = $null
     OpenClawWrapperPath = $null
     DryRun = $DryRun.IsPresent
     Verification = New-Object System.Collections.Generic.List[object]
     WrapperPaths = New-Object System.Collections.Generic.List[string]
+    Provisioning = New-Object System.Collections.Generic.List[object]
+    Prerequisites = New-Object System.Collections.Generic.List[object]
+    Readiness = $null
 }
 
 function Write-Info($Message) { Write-Host "[INFO] $Message" -ForegroundColor Cyan }
@@ -49,10 +58,66 @@ function Ensure-Directory {
 
 function Read-JsonFile {
     param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $null
+    }
     if (-not (Test-Path -LiteralPath $Path)) {
         return $null
     }
     return (Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json)
+}
+
+function Convert-ToArray {
+    param([object]$Value)
+
+    if ($null -eq $Value) {
+        return @()
+    }
+
+    return @($Value)
+}
+
+function Get-ObjectPropertyValue {
+    param(
+        [object]$Object,
+        [string]$Name,
+        $Default = $null
+    )
+
+    if ($null -eq $Object) {
+        return $Default
+    }
+
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property) {
+        return $Default
+    }
+
+    if ($null -eq $property.Value) {
+        return $Default
+    }
+
+    return $property.Value
+}
+
+function Get-FileSha256 {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $null
+    }
+
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [System.IO.File]::OpenRead($Path)
+        try {
+            return ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+        } finally {
+            $stream.Dispose()
+        }
+    } finally {
+        $sha.Dispose()
+    }
 }
 
 function Save-JsonFile {
@@ -199,6 +264,20 @@ function Resolve-RuntimeSourceRootCandidate {
     ))
 }
 
+function Resolve-BuildMetadataPathCandidate {
+    return (Resolve-FirstExistingPath -Candidates @(
+        (Join-Path $script:Installer.InvokerRoot "workflow-pack-build-metadata.json"),
+        (Join-Path $script:Installer.InvokerRoot "payload\workflow-pack-build-metadata.json")
+    ))
+}
+
+function Resolve-SourceLockPathCandidate {
+    return (Resolve-FirstExistingPath -Candidates @(
+        (Join-Path $script:Installer.InvokerRoot "workflow-pack-source-lock.json"),
+        (Join-Path $script:Installer.InvokerRoot "payload\workflow-pack-source-lock.json")
+    ))
+}
+
 function Quote-CmdArg {
     param([string]$Value)
 
@@ -275,7 +354,7 @@ function Assert-ProbeSucceeded {
     }
 }
 
-function Get-AgentReachRuntimeToolsRoot {
+function Get-WorkflowRuntimeToolsRoot {
     param([string]$RuntimeRoot = $script:Installer.RuntimeRoot)
     return (Join-Path $RuntimeRoot "tools")
 }
@@ -283,7 +362,7 @@ function Get-AgentReachRuntimeToolsRoot {
 function Resolve-GitExecutablePath {
     param([string]$RuntimeRoot = $script:Installer.RuntimeRoot)
 
-    $gitRoot = Join-Path (Get-AgentReachRuntimeToolsRoot -RuntimeRoot $RuntimeRoot) "git"
+    $gitRoot = Join-Path (Get-WorkflowRuntimeToolsRoot -RuntimeRoot $RuntimeRoot) "git"
     $gitExe = Resolve-FirstExistingPath -Candidates @(
         (Join-Path $gitRoot "cmd\git.exe"),
         (Join-Path $gitRoot "bin\git.exe"),
@@ -296,12 +375,37 @@ function Resolve-GitExecutablePath {
     return $gitExe
 }
 
-function Get-AgentReachBootstrapBlock {
-    $toolsRoot = Get-AgentReachRuntimeToolsRoot
+function Resolve-BashExecutablePath {
+    param([string]$RuntimeRoot = $script:Installer.RuntimeRoot)
+
+    $gitRoot = Join-Path (Get-WorkflowRuntimeToolsRoot -RuntimeRoot $RuntimeRoot) "git"
+    $bashExe = Resolve-FirstExistingPath -Candidates @(
+        (Join-Path $gitRoot "bin\bash.exe"),
+        (Join-Path $gitRoot "usr\bin\bash.exe"),
+        (Join-Path $gitRoot "git-bash.exe")
+    )
+    if (-not $bashExe) {
+        Write-Err ("Portable bash executable was not found in: {0}" -f $gitRoot)
+    }
+    return $bashExe
+}
+
+function Resolve-JqExecutablePath {
+    param([string]$RuntimeRoot = $script:Installer.RuntimeRoot)
+
+    $jqRoot = Join-Path (Get-WorkflowRuntimeToolsRoot -RuntimeRoot $RuntimeRoot) "jq"
+    return (Resolve-FirstExistingPath -Candidates @(
+        (Join-Path $jqRoot "jq.exe")
+    ))
+}
+
+function Get-WorkflowBootstrapBlock {
+    $toolsRoot = Get-WorkflowRuntimeToolsRoot
     $pythonRoot = Join-Path $toolsRoot "python"
     $nodeRoot = Join-Path $toolsRoot "node"
     $ghBinRoot = Join-Path $toolsRoot "gh\bin"
     $gitRoot = Join-Path $toolsRoot "git"
+    $jqRoot = Join-Path $toolsRoot "jq"
     return @"
 set "OPENCLAW_WORKFLOW_PACK_ROOT=$($script:Installer.RuntimeRoot)"
 set "OPENCLAW_SYSTEM_ROOT=%SystemRoot%"
@@ -312,9 +416,11 @@ if defined LOCALAPPDATA if exist "%LOCALAPPDATA%\Microsoft\WindowsApps" set "PAT
 if exist "$gitRoot\cmd\git.exe" set "PATH=$gitRoot\cmd;%PATH%"
 if exist "$gitRoot\bin\git.exe" set "PATH=$gitRoot\bin;%PATH%"
 if exist "$gitRoot\mingw64\bin\git.exe" set "PATH=$gitRoot\mingw64\bin;%PATH%"
+if exist "$gitRoot\usr\bin\bash.exe" set "PATH=$gitRoot\usr\bin;%PATH%"
 if exist "$ghBinRoot\gh.exe" set "PATH=$ghBinRoot;%PATH%"
 if exist "$nodeRoot\node.exe" set "PATH=$nodeRoot;%PATH%"
 if exist "$pythonRoot\python.exe" set "PATH=$pythonRoot;%PATH%"
+if exist "$jqRoot\jq.exe" set "PATH=$jqRoot;%PATH%"
 if exist "$pythonRoot\python.exe" set "OPENCLAW_WORKFLOW_PACK_PYTHON=$pythonRoot\python.exe"
 "@
 }
@@ -328,7 +434,7 @@ function Install-Wrapper {
     )
 
     $wrapperPath = Join-Path $script:Installer.BinDir ("{0}.cmd" -f $Name)
-    $bootstrap = Get-AgentReachBootstrapBlock
+    $bootstrap = Get-WorkflowBootstrapBlock
     switch ($Type) {
         "exe" {
             $content = @"
@@ -371,6 +477,101 @@ exit /b %ERRORLEVEL%
     Write-Ok ("Wrapper installed to: {0}" -f $wrapperPath)
 }
 
+function Get-NodePackageRuntimeCommandPath {
+    param(
+        [string]$CommandName,
+        [string]$RuntimeRoot = $script:Installer.RuntimeRoot
+    )
+
+    $nodeRoot = Join-Path (Get-WorkflowRuntimeToolsRoot -RuntimeRoot $RuntimeRoot) "node"
+    return (Resolve-FirstExistingPath -Candidates @(
+        (Join-Path $nodeRoot ("{0}.cmd" -f $CommandName)),
+        (Join-Path $nodeRoot ("{0}.exe" -f $CommandName))
+    ))
+}
+
+function Install-FoundationRuntime {
+    if (-not $script:Installer.RuntimeSourceRoot) {
+        if ($script:Installer.DryRun) {
+            Write-Note "Dry-run: no runtime payload was found; runtime installation skipped."
+            return
+        }
+        Write-Err "Workflow pack manifest declares a runtime payload, but no runtime payload was found."
+    }
+
+    Write-Info "Installing runtime payload..."
+    Remove-ManagedPath -Path $script:Installer.RuntimeRoot
+    Copy-DirectoryContent -Source $script:Installer.RuntimeSourceRoot -Destination $script:Installer.RuntimeRoot
+
+    $runtimeInspectionRoot = if ($script:Installer.DryRun) {
+        $script:Installer.RuntimeSourceRoot
+    } else {
+        $script:Installer.RuntimeRoot
+    }
+    $toolsRoot = Get-WorkflowRuntimeToolsRoot -RuntimeRoot $runtimeInspectionRoot
+    $runtimeCommands = @(
+        @(Convert-ToArray -Value (Get-ObjectPropertyValue -Object $script:Installer.Manifest.runtime -Name "commands")) |
+            ForEach-Object { "$_" }
+    )
+    $requiredPaths = @(
+        (Resolve-FirstExistingPath -Candidates @(
+            (Join-Path $toolsRoot "gh\bin\gh.exe")
+        )),
+        (Resolve-FirstExistingPath -Candidates @(
+            (Join-Path $toolsRoot "node\node.exe")
+        ))
+    )
+    if (@($runtimeCommands | Where-Object { $_ -ieq "agent-reach" }).Count -gt 0) {
+        $requiredPaths += Resolve-FirstExistingPath -Candidates @(
+            (Join-Path $toolsRoot "python\python.exe")
+        )
+    }
+    foreach ($requiredPath in @($requiredPaths)) {
+        if ([string]::IsNullOrWhiteSpace($requiredPath) -or -not (Test-Path -LiteralPath $requiredPath)) {
+            Write-Err ("Workflow runtime is missing a required file: {0}" -f $requiredPath)
+        }
+    }
+
+    $gitExe = Resolve-GitExecutablePath -RuntimeRoot $runtimeInspectionRoot
+    $ghExe = Resolve-FirstExistingPath -Candidates @(
+        (Join-Path $toolsRoot "gh\bin\gh.exe")
+    )
+    Install-Wrapper -Name "git" -Type "exe" -Target $gitExe
+    Install-Wrapper -Name "gh" -Type "exe" -Target $ghExe
+
+    foreach ($commandName in @($runtimeCommands)) {
+        switch ($commandName.ToLowerInvariant()) {
+            "agent-reach" {
+                Install-Wrapper -Name "agent-reach" -Type "python" -Target $null
+            }
+            "git" { }
+            "gh" { }
+            "bash" {
+                Install-Wrapper -Name "bash" -Type "exe" -Target (Resolve-BashExecutablePath -RuntimeRoot $runtimeInspectionRoot)
+            }
+            "jq" {
+                $jqExe = Resolve-JqExecutablePath -RuntimeRoot $runtimeInspectionRoot
+                if (-not $jqExe) {
+                    Write-Err "jq.exe was declared by the workflow runtime but was not found."
+                }
+                Install-Wrapper -Name "jq" -Type "exe" -Target $jqExe
+            }
+            default {
+                $commandPath = Get-NodePackageRuntimeCommandPath -CommandName $commandName -RuntimeRoot $runtimeInspectionRoot
+                if (-not $commandPath) {
+                    Write-Err ("Runtime command '{0}' was declared but not found in the portable Node payload." -f $commandName)
+                }
+                $wrapperType = if ([IO.Path]::GetExtension($commandPath) -ieq ".exe") { "exe" } else { "cmd" }
+                Install-Wrapper -Name $commandName -Type $wrapperType -Target $commandPath
+            }
+        }
+    }
+}
+
+function Install-AgentReachRuntime {
+    Install-FoundationRuntime
+}
+
 function Initialize-Context {
     Assert-Administrator
 
@@ -385,6 +586,10 @@ function Initialize-Context {
     }
 
     $script:Installer.PackArchivePath = Resolve-PackArchivePathCandidate
+    $script:Installer.BuildMetadataPath = Resolve-BuildMetadataPathCandidate
+    $script:Installer.SourceLockPath = Resolve-SourceLockPathCandidate
+    $script:Installer.BuildMetadata = Read-JsonFile -Path $script:Installer.BuildMetadataPath
+    $script:Installer.SourceLock = Read-JsonFile -Path $script:Installer.SourceLockPath
     $script:Installer.RuntimeSourceRoot = Resolve-RuntimeSourceRootCandidate
     $script:Installer.OpenClawRoot = if ([string]::IsNullOrWhiteSpace($OpenClawRoot)) { Resolve-DefaultOpenClawRoot } else { $OpenClawRoot }
     $script:Installer.InstallStatePath = Join-Path $script:Installer.OpenClawRoot "install-state.json"
@@ -393,6 +598,8 @@ function Initialize-Context {
     $script:Installer.SupportRoot = Join-Path $script:Installer.OpenClawRoot ("support\workflow-packs\{0}" -f $script:Installer.PackId)
     $script:Installer.SupportArchivePath = Join-Path $script:Installer.SupportRoot ([IO.Path]::GetFileName($script:Installer.PackArchivePath))
     $script:Installer.SupportManifestPath = Join-Path $script:Installer.SupportRoot "pack-manifest.json"
+    $script:Installer.SupportBuildMetadataPath = Join-Path $script:Installer.SupportRoot "workflow-pack-build-metadata.json"
+    $script:Installer.SupportSourceLockPath = Join-Path $script:Installer.SupportRoot "workflow-pack-source-lock.json"
     $script:Installer.RuntimeRoot = Join-Path $script:Installer.OpenClawRoot ("workflow-packs\{0}\runtime" -f $script:Installer.PackId)
 
     if (-not (Test-Path -LiteralPath $script:Installer.InstallStatePath)) {
@@ -411,47 +618,12 @@ function Install-PackSupportAssets {
     Write-Info ("Installing support assets for workflow pack '{0}'..." -f $script:Installer.PackId)
     Copy-FileToPath -Source $script:Installer.PackArchivePath -Destination $script:Installer.SupportArchivePath
     Copy-FileToPath -Source $script:Installer.PackManifestPath -Destination $script:Installer.SupportManifestPath
-}
-
-function Install-AgentReachRuntime {
-    if (-not $script:Installer.RuntimeSourceRoot) {
-        if ($script:Installer.DryRun) {
-            Write-Note "Dry-run: no runtime payload was found; runtime installation skipped."
-            return
-        }
-        Write-Err "Workflow pack manifest declares the agent-reach runtime, but no runtime payload was found."
+    if (-not [string]::IsNullOrWhiteSpace($script:Installer.BuildMetadataPath)) {
+        Copy-FileToPath -Source $script:Installer.BuildMetadataPath -Destination $script:Installer.SupportBuildMetadataPath
     }
-
-    Write-Info "Installing runtime payload..."
-    Remove-ManagedPath -Path $script:Installer.RuntimeRoot
-    Copy-DirectoryContent -Source $script:Installer.RuntimeSourceRoot -Destination $script:Installer.RuntimeRoot
-
-    $runtimeInspectionRoot = if ($script:Installer.DryRun) {
-        $script:Installer.RuntimeSourceRoot
-    } else {
-        $script:Installer.RuntimeRoot
+    if (-not [string]::IsNullOrWhiteSpace($script:Installer.SourceLockPath)) {
+        Copy-FileToPath -Source $script:Installer.SourceLockPath -Destination $script:Installer.SupportSourceLockPath
     }
-
-    $required = @(
-        (Join-Path $runtimeInspectionRoot "tools\python\python.exe"),
-        (Join-Path $runtimeInspectionRoot "tools\node\node.exe"),
-        (Join-Path $runtimeInspectionRoot "tools\node\xreach.cmd"),
-        (Join-Path $runtimeInspectionRoot "tools\node\mcporter.cmd"),
-        (Join-Path $runtimeInspectionRoot "tools\gh\bin\gh.exe")
-    )
-
-    foreach ($path in $required) {
-        if (-not (Test-Path -LiteralPath $path)) {
-            Write-Err ("Workflow runtime is missing a required file: {0}" -f $path)
-        }
-    }
-
-    $gitExe = Resolve-GitExecutablePath -RuntimeRoot $runtimeInspectionRoot
-    Install-Wrapper -Name "agent-reach" -Type "python" -Target $null
-    Install-Wrapper -Name "git" -Type "exe" -Target $gitExe
-    Install-Wrapper -Name "gh" -Type "exe" -Target (Join-Path $script:Installer.RuntimeRoot "tools\gh\bin\gh.exe")
-    Install-Wrapper -Name "xreach" -Type "cmd" -Target (Join-Path $script:Installer.RuntimeRoot "tools\node\xreach.cmd")
-    Install-Wrapper -Name "mcporter" -Type "cmd" -Target (Join-Path $script:Installer.RuntimeRoot "tools\node\mcporter.cmd")
 }
 
 function Install-RuntimePayload {
@@ -463,6 +635,7 @@ function Install-RuntimePayload {
 
     switch ("$($runtime.key)") {
         "agent-reach" { Install-AgentReachRuntime }
+        "foundation-runtime" { Install-FoundationRuntime }
         default { Write-Warn ("Runtime key '{0}' is not supported yet; runtime payload skipped." -f $runtime.key) }
     }
 }
@@ -483,6 +656,176 @@ function Run-Verification {
     Assert-ProbeSucceeded -Name "Plugin info"
     Assert-ProbeSucceeded -Name "Plugins doctor"
     Assert-ProbeSucceeded -Name "Skills check"
+}
+
+function Resolve-ManagedRootPath {
+    param([string]$RootName)
+
+    switch ("$RootName") {
+        "support" { return $script:Installer.SupportRoot }
+        "runtime" { return $script:Installer.RuntimeRoot }
+        default   { return $script:Installer.OpenClawRoot }
+    }
+}
+
+function Resolve-ManagedTargetPath {
+    param([object]$Rule)
+
+    $rootName = Get-ObjectPropertyValue -Object $Rule -Name "root" -Default "openclaw"
+    $relativePath = Get-ObjectPropertyValue -Object $Rule -Name "path"
+    if ([string]::IsNullOrWhiteSpace("$relativePath")) {
+        return $null
+    }
+
+    return (Join-Path (Resolve-ManagedRootPath -RootName $rootName) "$relativePath")
+}
+
+function Invoke-WorkflowPackProvisioning {
+    $results = New-Object System.Collections.Generic.List[object]
+    foreach ($rule in @(Convert-ToArray -Value (Get-ObjectPropertyValue -Object $script:Installer.Manifest -Name "provisioning"))) {
+        $ruleType = "$((Get-ObjectPropertyValue -Object $rule -Name 'type'))"
+        $targetPath = Resolve-ManagedTargetPath -Rule $rule
+        switch ($ruleType) {
+            "ensure-directory" {
+                if (-not [string]::IsNullOrWhiteSpace($targetPath)) {
+                    Ensure-Directory -Path $targetPath
+                }
+                $results.Add([pscustomobject]@{
+                    type = $ruleType
+                    path = $targetPath
+                    success = $true
+                    summary = "Directory ensured."
+                }) | Out-Null
+            }
+            "ensure-json-file" {
+                $payload = Get-ObjectPropertyValue -Object $rule -Name "value" -Default ([pscustomobject]@{})
+                if (-not [string]::IsNullOrWhiteSpace($targetPath) -and -not (Test-Path -LiteralPath $targetPath)) {
+                    Ensure-Directory -Path (Split-Path -Path $targetPath -Parent)
+                    Save-JsonFile -Path $targetPath -Object $payload
+                }
+                $results.Add([pscustomobject]@{
+                    type = $ruleType
+                    path = $targetPath
+                    success = $true
+                    summary = "JSON file ensured."
+                }) | Out-Null
+            }
+            "copy-tree" {
+                $sourceRootName = Get-ObjectPropertyValue -Object $rule -Name "sourceRoot" -Default "support"
+                $sourcePath = Join-Path (Resolve-ManagedRootPath -RootName $sourceRootName) "$(Get-ObjectPropertyValue -Object $rule -Name 'sourcePath')"
+                if (-not [string]::IsNullOrWhiteSpace($targetPath)) {
+                    Copy-DirectoryContent -Source $sourcePath -Destination $targetPath
+                }
+                $results.Add([pscustomobject]@{
+                    type = $ruleType
+                    path = $targetPath
+                    source = $sourcePath
+                    success = $true
+                    summary = "Directory tree copied."
+                }) | Out-Null
+            }
+            default {
+                if (-not [string]::IsNullOrWhiteSpace($ruleType)) {
+                    Write-Warn ("Unknown provisioning rule type '{0}' was skipped." -f $ruleType)
+                    $results.Add([pscustomobject]@{
+                        type = $ruleType
+                        path = $targetPath
+                        success = $false
+                        summary = "Unknown provisioning rule type."
+                    }) | Out-Null
+                }
+            }
+        }
+    }
+
+    $script:Installer.Provisioning = $results
+}
+
+function Test-CommandAvailable {
+    param([string]$CommandName)
+
+    if ([string]::IsNullOrWhiteSpace($CommandName)) {
+        return $false
+    }
+
+    $wrapperPath = Join-Path $script:Installer.BinDir ("{0}.cmd" -f $CommandName)
+    if (Test-Path -LiteralPath $wrapperPath -PathType Leaf) {
+        return $true
+    }
+
+    return ($null -ne (Get-Command $CommandName -ErrorAction SilentlyContinue))
+}
+
+function Invoke-WorkflowPackPrerequisites {
+    $results = New-Object System.Collections.Generic.List[object]
+    foreach ($rule in @(Convert-ToArray -Value (Get-ObjectPropertyValue -Object $script:Installer.Manifest -Name "prerequisites"))) {
+        $ruleType = "$((Get-ObjectPropertyValue -Object $rule -Name 'type'))"
+        $severity = "$((Get-ObjectPropertyValue -Object $rule -Name 'severity' -Default 'warning'))"
+        $message = "$((Get-ObjectPropertyValue -Object $rule -Name 'message'))"
+        $success = $false
+        $summary = $message
+
+        switch ($ruleType) {
+            "command-available" {
+                $success = Test-CommandAvailable -CommandName "$(Get-ObjectPropertyValue -Object $rule -Name 'command')"
+                $summary = if ($success) { "Command is available." } else { $message }
+            }
+            "path-exists" {
+                $targetPath = Resolve-ManagedTargetPath -Rule $rule
+                $success = (-not [string]::IsNullOrWhiteSpace($targetPath) -and (Test-Path -LiteralPath $targetPath))
+                $summary = if ($success) { "Path exists." } else { $message }
+            }
+            "manual-step" {
+                $success = $false
+                $summary = $message
+            }
+            default {
+                $success = $false
+                $summary = "Unknown prerequisite type."
+            }
+        }
+
+        $results.Add([pscustomobject]@{
+            id = "$(Get-ObjectPropertyValue -Object $rule -Name 'id')"
+            type = $ruleType
+            severity = $severity
+            success = [bool]$success
+            summary = $summary
+        }) | Out-Null
+    }
+
+    $script:Installer.Prerequisites = $results
+}
+
+function Update-WorkflowPackReadiness {
+    $requiredSourceFailures = @()
+    foreach ($entry in @(Convert-ToArray -Value (Get-ObjectPropertyValue -Object $script:Installer.SourceLock -Name "sources"))) {
+        $isRequired = [bool](Get-ObjectPropertyValue -Object $entry -Name "required" -Default $false)
+        if ($isRequired -and "$(Get-ObjectPropertyValue -Object $entry -Name 'status')" -ne "resolved") {
+            $requiredSourceFailures += [pscustomobject]@{
+                skillId = "$(Get-ObjectPropertyValue -Object $entry -Name 'skillId')"
+                summary = "$(Get-ObjectPropertyValue -Object $entry -Name 'summary')"
+            }
+        }
+    }
+
+    $blockingPrereqs = @($script:Installer.Prerequisites | Where-Object { -not $_.success -and $_.severity -eq "error" })
+    $warningPrereqs = @($script:Installer.Prerequisites | Where-Object { -not $_.success -and $_.severity -ne "error" })
+    $status = if ($requiredSourceFailures.Count -gt 0 -or $blockingPrereqs.Count -gt 0) {
+        "needs-attention"
+    } elseif ($warningPrereqs.Count -gt 0) {
+        "warning"
+    } else {
+        "ready"
+    }
+
+    $script:Installer.Readiness = [pscustomobject]@{
+        status = $status
+        summary = $(if ($status -eq "ready") { "Workflow pack is installed and ready." } elseif ($status -eq "warning") { "Workflow pack is installed, but some manual follow-up may still be required." } else { "Workflow pack is installed, but not all declared capabilities are ready yet." })
+        unresolvedRequiredSkills = @($requiredSourceFailures)
+        blockingPrerequisites = @($blockingPrereqs)
+        warningPrerequisites = @($warningPrereqs)
+    }
 }
 
 function Ensure-NoteProperty {
@@ -529,6 +872,11 @@ function Save-WorkflowPackState {
     } else {
         $null
     }
+    $runtimeLayout = if ($script:Installer.Manifest.runtime) {
+        "$($script:Installer.Manifest.runtime.layout)"
+    } else {
+        $null
+    }
     $wrapperPaths = $script:Installer.WrapperPaths.ToArray()
     $verification = $script:Installer.Verification.ToArray()
 
@@ -539,14 +887,22 @@ function Save-WorkflowPackState {
         pluginId = "$($script:Installer.Manifest.pluginId)"
         archivePath = $script:Installer.SupportArchivePath
         manifestPath = $script:Installer.SupportManifestPath
+        buildMetadataPath = $script:Installer.SupportBuildMetadataPath
+        buildMetadataSha256 = Get-FileSha256 -Path $script:Installer.SupportBuildMetadataPath
+        sourceLockPath = $script:Installer.SupportSourceLockPath
+        sourceLockSha256 = Get-FileSha256 -Path $script:Installer.SupportSourceLockPath
         supportRoot = $script:Installer.SupportRoot
         runtimeRoot = $runtimeRoot
         runtimeKey = $runtimeKey
+        runtimeLayout = $runtimeLayout
         installed = $true
         installedAt = $installedAt
         verifiedAt = (Get-Date).ToString("o")
         wrapperPaths = $wrapperPaths
         verification = $verification
+        provisioning = @($script:Installer.Provisioning.ToArray())
+        prerequisites = @($script:Installer.Prerequisites.ToArray())
+        readiness = $script:Installer.Readiness
     }
 
     if ($workflowPackPropertyNames -contains $script:Installer.PackId) {
@@ -563,6 +919,9 @@ function Install-WorkflowPack {
     Install-RuntimePayload
     Install-PluginPack
     Run-Verification
+    Invoke-WorkflowPackProvisioning
+    Invoke-WorkflowPackPrerequisites
+    Update-WorkflowPackReadiness
     Save-WorkflowPackState
 }
 
