@@ -14,6 +14,13 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+try {
+    Add-Type -AssemblyName System.IO.Compression -ErrorAction Stop
+} catch {}
+try {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+} catch {}
+
 $script:Installer = [ordered]@{
     Locale = $Locale
     InvokerRoot = $null
@@ -217,6 +224,107 @@ function Resolve-FirstExistingPath {
         }
     }
     return $null
+}
+
+function New-DirectoryZipArchive {
+    param(
+        [string]$SourceDir,
+        [string]$DestinationZipPath
+    )
+
+    if (Test-Path -LiteralPath $DestinationZipPath) {
+        Remove-Item -LiteralPath $DestinationZipPath -Force -ErrorAction SilentlyContinue
+    }
+
+    $archive = [System.IO.Compression.ZipFile]::Open($DestinationZipPath, [System.IO.Compression.ZipArchiveMode]::Create)
+    try {
+        foreach ($file in @(Get-ChildItem -Path $SourceDir -Recurse -File)) {
+            $entryName = $file.FullName.Substring($SourceDir.Length).TrimStart('\').Replace('\', '/')
+            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $file.FullName, $entryName, [System.IO.Compression.CompressionLevel]::NoCompression) | Out-Null
+        }
+    } finally {
+        $archive.Dispose()
+    }
+}
+
+function Get-ZipArchiveEntryNames {
+    param([string]$ArchivePath)
+
+    if (-not (Test-Path -LiteralPath $ArchivePath -PathType Leaf)) {
+        Write-Err ("Plugin archive was not found: {0}" -f $ArchivePath)
+    }
+
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($ArchivePath)
+    try {
+        return @($archive.Entries | ForEach-Object { $_.FullName.Replace('\', '/').TrimStart('/') })
+    } finally {
+        $archive.Dispose()
+    }
+}
+
+function Get-PluginArchiveLayoutInfo {
+    param([string]$ArchivePath)
+
+    $entryNames = @(Get-ZipArchiveEntryNames -ArchivePath $ArchivePath)
+    $entrySet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($entryName in @($entryNames)) {
+        if (-not [string]::IsNullOrWhiteSpace($entryName)) {
+            [void]$entrySet.Add($entryName)
+        }
+    }
+
+    return [pscustomobject]@{
+        ArchivePath = $ArchivePath
+        EntryNames = $entryNames
+        HasPackageRoot = $entrySet.Contains("package/package.json")
+        HasLegacyFlatRoot = $entrySet.Contains("package.json")
+    }
+}
+
+function Ensure-PluginArchiveInstallLayout {
+    $layout = Get-PluginArchiveLayoutInfo -ArchivePath $script:Installer.SupportArchivePath
+    if ($layout.HasPackageRoot) {
+        Add-VerificationEntry -Name "Normalize plugin archive layout" -ExitCode 0 -Message "Archive already uses package/ root layout."
+        return
+    }
+
+    if (-not $layout.HasLegacyFlatRoot) {
+        Add-VerificationEntry -Name "Normalize plugin archive layout" -ExitCode 1 -Message "Archive layout is unsupported: neither package/package.json nor root package.json was found."
+        Write-Err ("Workflow pack archive layout is unsupported for OpenClaw install: {0}" -f $script:Installer.SupportArchivePath)
+    }
+
+    Write-Warn ("Workflow pack archive uses a legacy flat root layout; it will be normalized for OpenClaw compatibility: {0}" -f $script:Installer.SupportArchivePath)
+    if ($script:Installer.DryRun) {
+        Add-VerificationEntry -Name "Normalize plugin archive layout" -ExitCode 0 -Message "Dry-run: legacy flat archive layout would be repacked under package/."
+        return
+    }
+
+    $tempRoot = Join-Path $env:TEMP ("openclaw-workflow-pack-layout-" + [guid]::NewGuid().ToString("N"))
+    $extractRoot = Join-Path $tempRoot "extract"
+    $wrappedRoot = Join-Path $tempRoot "wrapped"
+    $packageRoot = Join-Path $wrappedRoot "package"
+    $normalizedArchivePath = Join-Path $tempRoot ([IO.Path]::GetFileName($script:Installer.SupportArchivePath))
+
+    try {
+        Ensure-Directory -Path $extractRoot
+        Ensure-Directory -Path $packageRoot
+        [System.IO.Compression.ZipFile]::ExtractToDirectory($script:Installer.SupportArchivePath, $extractRoot)
+        Copy-Item -Path (Join-Path $extractRoot '*') -Destination $packageRoot -Recurse -Force
+        New-DirectoryZipArchive -SourceDir $wrappedRoot -DestinationZipPath $normalizedArchivePath
+
+        $normalizedLayout = Get-PluginArchiveLayoutInfo -ArchivePath $normalizedArchivePath
+        if (-not $normalizedLayout.HasPackageRoot) {
+            Write-Err ("Normalized workflow pack archive is still invalid: {0}" -f $normalizedArchivePath)
+        }
+
+        Copy-Item -LiteralPath $normalizedArchivePath -Destination $script:Installer.SupportArchivePath -Force
+        Add-VerificationEntry -Name "Normalize plugin archive layout" -ExitCode 0 -Message "Legacy flat archive layout was normalized to package/."
+        Write-Ok ("Workflow pack archive layout normalized: {0}" -f $script:Installer.SupportArchivePath)
+    } finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 function Test-IsAdministrator {
@@ -1310,6 +1418,7 @@ function Install-WorkflowPack {
     Initialize-Context
     Normalize-RedundantBundledPlugins
     Install-PackSupportAssets
+    Ensure-PluginArchiveInstallLayout
     Install-RuntimePayload
     Install-PluginPack
     Run-Verification

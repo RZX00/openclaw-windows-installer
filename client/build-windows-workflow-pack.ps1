@@ -66,6 +66,7 @@ function New-DirectoryZipArchive {
     param(
         [string]$SourceDir,
         [string]$DestinationZipPath,
+        [string]$RootPrefix,
         [System.IO.Compression.CompressionLevel]$CompressionLevel = [System.IO.Compression.CompressionLevel]::NoCompression
     )
 
@@ -75,8 +76,17 @@ function New-DirectoryZipArchive {
 
     $archive = [System.IO.Compression.ZipFile]::Open($DestinationZipPath, [System.IO.Compression.ZipArchiveMode]::Create)
     try {
+        $normalizedRootPrefix = if ([string]::IsNullOrWhiteSpace($RootPrefix)) {
+            $null
+        } else {
+            ($RootPrefix.Trim().Trim('/').Trim('\').Replace('\', '/'))
+        }
+
         foreach ($file in (Get-ChildItem -Path $SourceDir -Recurse -File)) {
             $entryName = $file.FullName.Substring($SourceDir.Length).TrimStart('\').Replace('\', '/')
+            if (-not [string]::IsNullOrWhiteSpace($normalizedRootPrefix)) {
+                $entryName = "{0}/{1}" -f $normalizedRootPrefix, $entryName
+            }
             [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $file.FullName, $entryName, $CompressionLevel) | Out-Null
         }
     } finally {
@@ -791,7 +801,7 @@ function Build-WorkflowPack {
     }
 
     Write-Info ("Building workflow pack archive for '{0}' -> {1}" -f $PackId, $outputZipPath)
-    New-DirectoryZipArchive -SourceDir $stageDir -DestinationZipPath $outputZipPath -CompressionLevel ([System.IO.Compression.CompressionLevel]::NoCompression)
+    New-DirectoryZipArchive -SourceDir $stageDir -DestinationZipPath $outputZipPath -RootPrefix "package" -CompressionLevel ([System.IO.Compression.CompressionLevel]::NoCompression)
 
     if (-not (Test-Path -LiteralPath $outputZipPath)) {
         Write-Err ("Workflow pack archive was not produced: {0}" -f $outputZipPath)
