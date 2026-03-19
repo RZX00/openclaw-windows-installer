@@ -4,6 +4,7 @@ param(
     [string]$Locale = "zh-CN",
     [string]$InvokerRoot,
     [string]$OpenClawRoot,
+    [string]$ReportPath,
     [string]$PackId,
     [string]$PackArchivePath,
     [string]$PackManifestPath,
@@ -216,12 +217,36 @@ function Assert-Administrator {
 }
 
 function Resolve-DefaultOpenClawRoot {
-    $defaultRoot = Join-Path $env:ProgramData "OpenClaw"
-    $state = Read-JsonFile -Path (Join-Path $defaultRoot "install-state.json")
-    if ($state -and -not [string]::IsNullOrWhiteSpace("$($state.dataRoot)")) {
-        return "$($state.dataRoot)"
+    $candidates = @(
+        $env:OPENCLAW_INSTALL_ROOT,
+        (Join-Path $env:ProgramData "OpenClaw"),
+        $(if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) { Join-Path $env:LOCALAPPDATA "OpenClaw" } else { $null }),
+        $(if (-not [string]::IsNullOrWhiteSpace($env:APPDATA)) { Join-Path $env:APPDATA "OpenClaw" } else { $null })
+    )
+
+    foreach ($candidate in @($candidates)) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) {
+            continue
+        }
+
+        $statePath = Join-Path $candidate "install-state.json"
+        $state = Read-JsonFile -Path $statePath
+        if (-not $state) {
+            continue
+        }
+
+        $resolvedRoot = if (-not [string]::IsNullOrWhiteSpace("$($state.dataRoot)")) {
+            "$($state.dataRoot)"
+        } else {
+            $candidate
+        }
+
+        if (Test-Path -LiteralPath (Join-Path $resolvedRoot "bin\openclaw.cmd")) {
+            return $resolvedRoot
+        }
     }
-    return $defaultRoot
+
+    return (Join-Path $env:ProgramData "OpenClaw")
 }
 
 function Resolve-PackManifestPathCandidate {
@@ -913,6 +938,46 @@ function Save-WorkflowPackState {
     Write-Ok ("Workflow pack state written into install-state.json for '{0}'." -f $script:Installer.PackId)
 }
 
+function Write-InstallReport {
+    param(
+        [bool]$Success,
+        [string]$Summary,
+        [string]$ErrorMessage = $null
+    )
+
+    if ([string]::IsNullOrWhiteSpace($ReportPath)) {
+        return
+    }
+
+    $payload = [pscustomobject]@{
+        packId = $script:Installer.PackId
+        displayName = $(if ($script:Installer.Manifest) { "$($script:Installer.Manifest.displayName)" } else { $null })
+        version = $(if ($script:Installer.Manifest) { "$($script:Installer.Manifest.version)" } else { $null })
+        pluginId = $(if ($script:Installer.Manifest) { "$($script:Installer.Manifest.pluginId)" } else { $null })
+        success = [bool]$Success
+        summary = $Summary
+        error = $ErrorMessage
+        openClawRoot = $script:Installer.OpenClawRoot
+        supportRoot = $script:Installer.SupportRoot
+        runtimeRoot = $script:Installer.RuntimeRoot
+        verification = @($script:Installer.Verification.ToArray())
+        provisioning = @($script:Installer.Provisioning.ToArray())
+        prerequisites = @($script:Installer.Prerequisites.ToArray())
+        readiness = $script:Installer.Readiness
+        generatedAt = (Get-Date).ToString("o")
+    }
+
+    if ($script:Installer.DryRun) {
+        Write-Note ("Dry-run write install report: {0}" -f $ReportPath)
+        return
+    }
+
+    Ensure-Directory -Path (Split-Path -Path $ReportPath -Parent)
+    $json = $payload | ConvertTo-Json -Depth 12
+    [System.IO.File]::WriteAllText($ReportPath, $json, (New-Object System.Text.UTF8Encoding($true)))
+    Write-Ok ("Install report written: {0}" -f $ReportPath)
+}
+
 function Install-WorkflowPack {
     Initialize-Context
     Install-PackSupportAssets
@@ -925,4 +990,19 @@ function Install-WorkflowPack {
     Save-WorkflowPackState
 }
 
-Install-WorkflowPack
+try {
+    Install-WorkflowPack
+    $summary = if ($script:Installer.Readiness -and $script:Installer.Readiness.status -eq "ready") {
+        "Workflow pack installation completed and verification passed."
+    } elseif ($script:Installer.Readiness -and $script:Installer.Readiness.status -eq "warning") {
+        "Workflow pack installation completed, but some manual follow-up may still be required."
+    } else {
+        "Workflow pack installation completed, but the declared readiness state still needs attention."
+    }
+    Write-InstallReport -Success $true -Summary $summary
+} catch {
+    try {
+        Write-InstallReport -Success $false -Summary "Workflow pack installation failed." -ErrorMessage $_.Exception.Message
+    } catch {}
+    throw
+}

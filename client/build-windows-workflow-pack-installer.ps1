@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [ValidateSet("zh-CN", "en-US")]
     [string]$Locale = "zh-CN",
@@ -242,7 +242,8 @@ function ConvertTo-CSharpStringLiteral {
     param([AllowNull()][string]$Value)
 
     $text = if ($null -eq $Value) { "" } else { [string]$Value }
-    return '"' + $text.Replace('\', '\\').Replace('"', '\"') + '"'
+    $text = $text.Replace('\', '\\').Replace('"', '\"').Replace("`r", '\r').Replace("`n", '\n').Replace("`t", '\t')
+    return '"' + $text + '"'
 }
 
 function Compile-CSharpExecutable {
@@ -882,6 +883,8 @@ function Build-WorkflowPluginArchive {
 }
 
 function Get-EmbeddedLauncherSource {
+    param([object]$WorkflowPack)
+
     $source = @'
 using System;
 using System.Collections.Generic;
@@ -905,6 +908,10 @@ public static class Program
     private const string PayloadExtractMessage = __PAYLOAD_EXTRACT__;
     private const string PayloadUnpackMessage = __PAYLOAD_UNPACK__;
     private const string StartingInstallMessage = __STARTING_INSTALL__;
+    internal const string InstallRunningMessage = __INSTALL_RUNNING__;
+    internal const string PackName = __PACK_NAME__;
+    internal const string PackDescription = __PACK_DESCRIPTION__;
+    internal const string PackSkills = __PACK_SKILLS__;
 
     [STAThread]
     public static int Main(string[] args)
@@ -923,17 +930,13 @@ public static class Program
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
-            string openClawRoot;
-            string preflightFailure;
-            if (!TryEnsureMainInstall(out openClawRoot, out preflightFailure))
+            InstallSelectionResult selection = ShowInstallSelection();
+            if (selection == null || !selection.Confirmed)
             {
-                MessageBox.Show(
-                    preflightFailure,
-                    "OpenClaw Workflow Pack",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Warning);
-                return 1;
+                return 0;
             }
+
+            string openClawRoot = selection.OpenClawRoot;
 
             progressForm = new ProgressForm();
             progressForm.Show();
@@ -947,23 +950,26 @@ public static class Program
             ExtractPayload(exePath, payloadZipPath, progressForm);
             ExtractZipWithProgress(payloadZipPath, extractRoot, progressForm);
             TryDelete(payloadZipPath);
-            progressForm.ReportStatus(StartingInstallMessage + "...", 100, "Launching installer window");
+            progressForm.ReportStatus(StartingInstallMessage + "...", 92, "Preparing installer");
 
-            string runInstallPath = Path.Combine(extractRoot, "run-install.cmd");
-            if (!File.Exists(runInstallPath))
+            string installScriptPath = Path.Combine(extractRoot, "install-windows-workflow-pack.ps1");
+            if (!File.Exists(installScriptPath))
             {
-                throw new FileNotFoundException("run-install.cmd was not found in the embedded payload.", runInstallPath);
+                throw new FileNotFoundException("install-windows-workflow-pack.ps1 was not found in the embedded payload.", installScriptPath);
             }
 
-            ProcessStartInfo startInfo = new ProcessStartInfo("cmd.exe", "/d /s /c \"\"" + runInstallPath + "\"\"")
+            string reportPath = Path.Combine(extractRoot, "install-report.json");
+            progressForm.ReportStatus(InstallRunningMessage + "...", 96, Path.GetFileName(openClawRoot));
+
+            ProcessStartInfo startInfo = new ProcessStartInfo("powershell.exe", BuildInstallerArgumentLine(installScriptPath, extractRoot, openClawRoot, reportPath))
             {
                 WorkingDirectory = extractRoot,
-                UseShellExecute = true,
-                WindowStyle = ProcessWindowStyle.Normal
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                WindowStyle = ProcessWindowStyle.Hidden
             };
-
-            progressForm.Close();
-            progressForm = null;
 
             using (Process process = Process.Start(startInfo))
             {
@@ -972,9 +978,18 @@ public static class Program
                     throw new InvalidOperationException("Failed to launch the embedded installer.");
                 }
 
-                process.WaitForExit();
+                List<string> installLog = CaptureInstallerOutput(process, progressForm);
+                int exitCode = process.ExitCode;
+
+                if (progressForm != null)
+                {
+                    progressForm.Close();
+                    progressForm = null;
+                }
+
+                ShowInstallResult(reportPath, exitCode, openClawRoot, installLog);
                 TryDeleteDirectory(extractRoot);
-                return process.ExitCode;
+                return exitCode;
             }
         }
         catch (Exception ex)
@@ -995,27 +1010,18 @@ public static class Program
         }
     }
 
-    private static bool TryEnsureMainInstall(out string openClawRoot, out string failureMessage)
+    private static InstallSelectionResult ShowInstallSelection()
     {
-        string defaultRoot = GetDefaultOpenClawRoot();
-        string installStatePath = Path.Combine(defaultRoot, "install-state.json");
-        if (!File.Exists(installStatePath))
+        using (InstallSelectionForm form = new InstallSelectionForm())
         {
-            openClawRoot = defaultRoot;
-            failureMessage = "Workflow add-on packages require an existing OpenClaw base installation. Install OpenClaw-Setup-Windows-x64.exe first, then run this package again.";
-            return false;
-        }
+            DialogResult result = form.ShowDialog();
+            if (result != DialogResult.OK || string.IsNullOrWhiteSpace(form.SelectedOpenClawRoot))
+            {
+                return new InstallSelectionResult(false, null);
+            }
 
-        openClawRoot = ResolveOpenClawRoot(defaultRoot, installStatePath);
-        string wrapperPath = Path.Combine(openClawRoot, "bin", "openclaw.cmd");
-        if (!File.Exists(wrapperPath))
-        {
-            failureMessage = "The main OpenClaw installation was not found or is incomplete. Run OpenClaw-Setup-Windows-x64.exe or OpenClaw-Repair.exe first.";
-            return false;
+            return new InstallSelectionResult(true, form.SelectedOpenClawRoot);
         }
-
-        failureMessage = null;
-        return true;
     }
 
     private static string GetDefaultOpenClawRoot()
@@ -1053,6 +1059,370 @@ public static class Program
         }
 
         return defaultRoot;
+    }
+
+    private static string NormalizeOpenClawRootCandidate(string candidate)
+    {
+        if (string.IsNullOrWhiteSpace(candidate))
+        {
+            return string.Empty;
+        }
+
+        string normalized = candidate.Trim().Trim('"');
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            return string.Empty;
+        }
+
+        if (File.Exists(normalized))
+        {
+            normalized = Path.GetDirectoryName(normalized);
+        }
+
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            return string.Empty;
+        }
+
+        string leaf = Path.GetFileName(normalized.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        if (string.Equals(leaf, "bin", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(leaf, "support", StringComparison.OrdinalIgnoreCase))
+        {
+            normalized = Directory.GetParent(normalized).FullName;
+        }
+
+        return normalized.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+    }
+
+    internal static bool TryResolveValidOpenClawRoot(string candidate, out string resolvedRoot, out string message)
+    {
+        resolvedRoot = NormalizeOpenClawRootCandidate(candidate);
+        if (string.IsNullOrWhiteSpace(resolvedRoot))
+        {
+            message = "OpenClaw install root cannot be empty.";
+            return false;
+        }
+
+        string installStatePath = Path.Combine(resolvedRoot, "install-state.json");
+        if (!File.Exists(installStatePath))
+        {
+            message = "install-state.json was not found in the selected directory.";
+            return false;
+        }
+
+        resolvedRoot = ResolveOpenClawRoot(resolvedRoot, installStatePath);
+        string wrapperPath = Path.Combine(resolvedRoot, "bin", "openclaw.cmd");
+        if (!File.Exists(wrapperPath))
+        {
+            message = "The selected OpenClaw directory is missing bin\\openclaw.cmd.";
+            return false;
+        }
+
+        message = "OpenClaw base installation was found.";
+        return true;
+    }
+
+    private static void AddCandidateRoot(List<string> roots, string candidate)
+    {
+        string normalized = NormalizeOpenClawRootCandidate(candidate);
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            return;
+        }
+
+        foreach (string existing in roots)
+        {
+            if (string.Equals(existing, normalized, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+        }
+
+        roots.Add(normalized);
+    }
+
+    private static void AddNamedChildCandidates(List<string> roots, string parentPath)
+    {
+        if (string.IsNullOrWhiteSpace(parentPath) || !Directory.Exists(parentPath))
+        {
+            return;
+        }
+
+        try
+        {
+            foreach (string childPath in Directory.GetDirectories(parentPath))
+            {
+                string name = Path.GetFileName(childPath);
+                if (string.IsNullOrWhiteSpace(name))
+                {
+                    continue;
+                }
+
+                if (name.IndexOf("openclaw", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    AddCandidateRoot(roots, childPath);
+                }
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    internal static List<string> DiscoverOpenClawInstallations()
+    {
+        List<string> roots = new List<string>();
+        AddCandidateRoot(roots, Environment.GetEnvironmentVariable("OPENCLAW_INSTALL_ROOT"));
+        AddCandidateRoot(roots, GetDefaultOpenClawRoot());
+        AddCandidateRoot(roots, Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OpenClaw"));
+        AddCandidateRoot(roots, Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "OpenClaw"));
+        AddCandidateRoot(roots, AppDomain.CurrentDomain.BaseDirectory);
+
+        string programData = Environment.GetEnvironmentVariable("ProgramData");
+        if (!string.IsNullOrWhiteSpace(programData))
+        {
+            AddNamedChildCandidates(roots, programData);
+        }
+
+        string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        if (!string.IsNullOrWhiteSpace(localAppData))
+        {
+            AddNamedChildCandidates(roots, localAppData);
+        }
+
+        string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        if (!string.IsNullOrWhiteSpace(appData))
+        {
+            AddNamedChildCandidates(roots, appData);
+        }
+
+        List<string> validated = new List<string>();
+        foreach (string root in roots)
+        {
+            string resolvedRoot;
+            string validationMessage;
+            if (TryResolveValidOpenClawRoot(root, out resolvedRoot, out validationMessage))
+            {
+                AddCandidateRoot(validated, resolvedRoot);
+            }
+        }
+
+        return validated;
+    }
+
+    private static string BuildInstallerArgumentLine(string installScriptPath, string invokerRoot, string openClawRoot, string reportPath)
+    {
+        List<string> args = new List<string>();
+        args.Add("-NoLogo");
+        args.Add("-NoProfile");
+        args.Add("-ExecutionPolicy");
+        args.Add("Bypass");
+        args.Add("-File");
+        args.Add(installScriptPath);
+        args.Add("-Locale");
+        args.Add("__INSTALLER_LOCALE__");
+        args.Add("-InvokerRoot");
+        args.Add(invokerRoot);
+        args.Add("-PackId");
+        args.Add("__PACK_ID__");
+        args.Add("-OpenClawRoot");
+        args.Add(openClawRoot);
+        args.Add("-ReportPath");
+        args.Add(reportPath);
+        return BuildCommandLine(args.ToArray());
+    }
+
+    private static List<string> CaptureInstallerOutput(Process process, ProgressForm progressForm)
+    {
+        List<string> lines = new List<string>();
+        process.OutputDataReceived += delegate(object sender, DataReceivedEventArgs eventArgs)
+        {
+            if (string.IsNullOrWhiteSpace(eventArgs.Data))
+            {
+                return;
+            }
+
+            lock (lines)
+            {
+                lines.Add(eventArgs.Data.Trim());
+            }
+
+            if (progressForm != null && !progressForm.IsDisposed && progressForm.IsHandleCreated)
+            {
+                progressForm.BeginInvoke((MethodInvoker)delegate
+                {
+                    if (!progressForm.IsDisposed)
+                    {
+                        progressForm.ReportStatus(InstallRunningMessage + "...", 97, eventArgs.Data.Trim());
+                    }
+                });
+            }
+        };
+
+        process.ErrorDataReceived += delegate(object sender, DataReceivedEventArgs eventArgs)
+        {
+            if (string.IsNullOrWhiteSpace(eventArgs.Data))
+            {
+                return;
+            }
+
+            lock (lines)
+            {
+                lines.Add(eventArgs.Data.Trim());
+            }
+
+            if (progressForm != null && !progressForm.IsDisposed && progressForm.IsHandleCreated)
+            {
+                progressForm.BeginInvoke((MethodInvoker)delegate
+                {
+                    if (!progressForm.IsDisposed)
+                    {
+                        progressForm.ReportStatus(InstallRunningMessage + "...", 97, eventArgs.Data.Trim());
+                    }
+                });
+            }
+        };
+
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
+
+        while (!process.WaitForExit(150))
+        {
+            Application.DoEvents();
+        }
+        process.WaitForExit();
+
+        return lines;
+    }
+
+    private static void ShowInstallResult(string reportPath, int exitCode, string openClawRoot, List<string> installLog)
+    {
+        string title = exitCode == 0 ? "Installation Complete" : "Installation Failed";
+        MessageBoxIcon icon = exitCode == 0 ? MessageBoxIcon.Information : MessageBoxIcon.Error;
+        string message = BuildInstallResultMessage(reportPath, exitCode, openClawRoot, installLog);
+        MessageBox.Show(message, title, MessageBoxButtons.OK, icon);
+    }
+
+    private static string BuildInstallResultMessage(string reportPath, int exitCode, string openClawRoot, List<string> installLog)
+    {
+        StringBuilder builder = new StringBuilder();
+        builder.AppendLine("Package: " + PackName);
+        builder.AppendLine("Target Root: " + openClawRoot);
+        builder.AppendLine("Result: " + (exitCode == 0 ? "Success" : "Failed"));
+
+        Dictionary<string, object> report = TryReadJsonObject(reportPath);
+        if (report != null)
+        {
+            string summary = TryGetString(report, "summary");
+            if (!string.IsNullOrWhiteSpace(summary))
+            {
+                builder.AppendLine("Summary: " + summary);
+            }
+
+            string displayName = TryGetString(report, "displayName");
+            if (!string.IsNullOrWhiteSpace(displayName))
+            {
+                builder.AppendLine("Pack: " + displayName);
+            }
+
+            Dictionary<string, object> readiness = TryGetDictionary(report, "readiness");
+            if (readiness != null)
+            {
+                string readinessStatus = TryGetString(readiness, "status");
+                string readinessSummary = TryGetString(readiness, "summary");
+                if (!string.IsNullOrWhiteSpace(readinessStatus))
+                {
+                    builder.AppendLine("Readiness: " + readinessStatus);
+                }
+                if (!string.IsNullOrWhiteSpace(readinessSummary))
+                {
+                    builder.AppendLine("Readiness Summary: " + readinessSummary);
+                }
+            }
+
+            object verificationNode;
+            if (report.TryGetValue("verification", out verificationNode))
+            {
+                object[] checks = verificationNode as object[];
+                if (checks != null && checks.Length > 0)
+                {
+                    builder.AppendLine("Verification:");
+                    foreach (object check in checks)
+                    {
+                        Dictionary<string, object> checkMap = check as Dictionary<string, object>;
+                        if (checkMap == null)
+                        {
+                            continue;
+                        }
+
+                        string name = TryGetString(checkMap, "name");
+                        string message = TryGetString(checkMap, "message");
+                        string exitCodeText = Convert.ToString(checkMap.ContainsKey("exitCode") ? checkMap["exitCode"] : null);
+                        builder.AppendLine("- " + name + ": " + (string.IsNullOrWhiteSpace(message) ? exitCodeText : message));
+                    }
+                }
+            }
+
+            string error = TryGetString(report, "error");
+            if (!string.IsNullOrWhiteSpace(error))
+            {
+                builder.AppendLine("Error: " + error);
+            }
+        }
+        else if (installLog != null && installLog.Count > 0)
+        {
+            builder.AppendLine("Last Output:");
+            foreach (string line in GetLastLines(installLog, 8))
+            {
+                builder.AppendLine("- " + line);
+            }
+        }
+
+        return builder.ToString().Trim();
+    }
+
+    private static IEnumerable<string> GetLastLines(List<string> lines, int count)
+    {
+        int startIndex = Math.Max(0, lines.Count - count);
+        for (int index = startIndex; index < lines.Count; index++)
+        {
+            yield return lines[index];
+        }
+    }
+
+    private static Dictionary<string, object> TryReadJsonObject(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+        {
+            return null;
+        }
+
+        try
+        {
+            string json = File.ReadAllText(path);
+            JavaScriptSerializer serializer = new JavaScriptSerializer();
+            return serializer.DeserializeObject(json) as Dictionary<string, object>;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static Dictionary<string, object> TryGetDictionary(Dictionary<string, object> dictionary, string key)
+    {
+        if (dictionary == null || string.IsNullOrWhiteSpace(key))
+        {
+            return null;
+        }
+
+        object value;
+        if (dictionary.TryGetValue(key, out value))
+        {
+            return value as Dictionary<string, object>;
+        }
+
+        return null;
     }
 
     private static string TryGetString(Dictionary<string, object> dictionary, string key)
@@ -1467,6 +1837,311 @@ public static class Program
 
 }
 
+internal sealed class InstallSelectionResult
+{
+    public InstallSelectionResult(bool confirmed, string openClawRoot)
+    {
+        Confirmed = confirmed;
+        OpenClawRoot = openClawRoot;
+    }
+
+    public bool Confirmed { get; private set; }
+    public string OpenClawRoot { get; private set; }
+}
+
+internal sealed class InstallSelectionForm : Form
+{
+    private readonly Label titleLabel;
+    private readonly Label packageLabel;
+    private readonly TextBox packageSummaryBox;
+    private readonly Label candidateLabel;
+    private readonly ListBox candidateListBox;
+    private readonly Label selectedLabel;
+    private readonly TextBox selectedPathBox;
+    private readonly Label statusLabel;
+    private readonly Button refreshButton;
+    private readonly Button browseButton;
+    private readonly Button installButton;
+    private readonly Button cancelButton;
+
+    public InstallSelectionForm()
+    {
+        Text = "OpenClaw Workflow Pack Installer";
+        StartPosition = FormStartPosition.CenterScreen;
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = false;
+        MinimizeBox = false;
+        ShowIcon = false;
+        TopMost = true;
+        BackColor = Color.White;
+        ClientSize = new Size(760, 540);
+        Font = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
+
+        titleLabel = new Label();
+        titleLabel.Left = 20;
+        titleLabel.Top = 18;
+        titleLabel.Width = 710;
+        titleLabel.Height = 30;
+        titleLabel.Font = new Font("Segoe UI Semibold", 13F, FontStyle.Bold, GraphicsUnit.Point);
+        titleLabel.Text = "Confirm Workflow Pack Installation";
+        Controls.Add(titleLabel);
+
+        packageLabel = new Label();
+        packageLabel.Left = 20;
+        packageLabel.Top = 58;
+        packageLabel.Width = 710;
+        packageLabel.Height = 22;
+        packageLabel.Text = "Package: " + Program.PackName;
+        Controls.Add(packageLabel);
+
+        packageSummaryBox = new TextBox();
+        packageSummaryBox.Left = 20;
+        packageSummaryBox.Top = 84;
+        packageSummaryBox.Width = 710;
+        packageSummaryBox.Height = 118;
+        packageSummaryBox.Multiline = true;
+        packageSummaryBox.ReadOnly = true;
+        packageSummaryBox.ScrollBars = ScrollBars.Vertical;
+        packageSummaryBox.BackColor = Color.White;
+        packageSummaryBox.Text = BuildPackageSummary();
+        Controls.Add(packageSummaryBox);
+
+        candidateLabel = new Label();
+        candidateLabel.Left = 20;
+        candidateLabel.Top = 218;
+        candidateLabel.Width = 710;
+        candidateLabel.Height = 22;
+        candidateLabel.Text = "Detected OpenClaw installation roots";
+        Controls.Add(candidateLabel);
+
+        candidateListBox = new ListBox();
+        candidateListBox.Left = 20;
+        candidateListBox.Top = 246;
+        candidateListBox.Width = 710;
+        candidateListBox.Height = 152;
+        candidateListBox.HorizontalScrollbar = true;
+        candidateListBox.SelectedIndexChanged += delegate { ApplyCurrentSelection(); };
+        Controls.Add(candidateListBox);
+
+        selectedLabel = new Label();
+        selectedLabel.Left = 20;
+        selectedLabel.Top = 410;
+        selectedLabel.Width = 710;
+        selectedLabel.Height = 22;
+        selectedLabel.Text = "Install into the selected OpenClaw root";
+        Controls.Add(selectedLabel);
+
+        selectedPathBox = new TextBox();
+        selectedPathBox.Left = 20;
+        selectedPathBox.Top = 438;
+        selectedPathBox.Width = 710;
+        selectedPathBox.Height = 26;
+        selectedPathBox.ReadOnly = true;
+        selectedPathBox.BackColor = Color.White;
+        Controls.Add(selectedPathBox);
+
+        statusLabel = new Label();
+        statusLabel.Left = 20;
+        statusLabel.Top = 474;
+        statusLabel.Width = 710;
+        statusLabel.Height = 22;
+        statusLabel.ForeColor = Color.FromArgb(88, 96, 105);
+        statusLabel.Text = "Click Search to locate an existing OpenClaw installation.";
+        Controls.Add(statusLabel);
+
+        refreshButton = new Button();
+        refreshButton.Left = 20;
+        refreshButton.Top = 500;
+        refreshButton.Width = 110;
+        refreshButton.Height = 28;
+        refreshButton.Text = "Search";
+        refreshButton.Click += delegate { RefreshCandidates(); };
+        Controls.Add(refreshButton);
+
+        browseButton = new Button();
+        browseButton.Left = 140;
+        browseButton.Top = 500;
+        browseButton.Width = 110;
+        browseButton.Height = 28;
+        browseButton.Text = "Browse";
+        browseButton.Click += delegate { BrowseForRoot(); };
+        Controls.Add(browseButton);
+
+        installButton = new Button();
+        installButton.Left = 502;
+        installButton.Top = 500;
+        installButton.Width = 110;
+        installButton.Height = 28;
+        installButton.Text = "Install";
+        installButton.Enabled = false;
+        installButton.Click += delegate { ConfirmInstall(); };
+        Controls.Add(installButton);
+
+        cancelButton = new Button();
+        cancelButton.Left = 620;
+        cancelButton.Top = 500;
+        cancelButton.Width = 110;
+        cancelButton.Height = 28;
+        cancelButton.Text = "Cancel";
+        cancelButton.Click += delegate { DialogResult = DialogResult.Cancel; Close(); };
+        Controls.Add(cancelButton);
+
+        Shown += delegate { RefreshCandidates(); };
+    }
+
+    public string SelectedOpenClawRoot { get; private set; }
+
+    private string BuildPackageSummary()
+    {
+        StringBuilder builder = new StringBuilder();
+        builder.AppendLine("Package Name: " + Program.PackName);
+        if (!string.IsNullOrWhiteSpace(Program.PackDescription))
+        {
+            builder.AppendLine("Description: " + Program.PackDescription);
+        }
+        if (!string.IsNullOrWhiteSpace(Program.PackSkills))
+        {
+            builder.AppendLine("Included Skills:");
+            builder.AppendLine(Program.PackSkills);
+        }
+        builder.AppendLine();
+        builder.AppendLine("The installer will first locate an existing OpenClaw base installation.");
+        builder.AppendLine("Installation starts only after you confirm the target root.");
+        builder.AppendLine("A result summary and verification report will be shown after installation.");
+        return builder.ToString().Trim();
+    }
+
+    private void RefreshCandidates()
+    {
+        statusLabel.Text = "Searching for OpenClaw installation roots...";
+        refreshButton.Enabled = false;
+        browseButton.Enabled = false;
+        installButton.Enabled = false;
+        UseWaitCursor = true;
+        Refresh();
+        Application.DoEvents();
+
+        try
+        {
+            List<string> candidates = Program.DiscoverOpenClawInstallations();
+            candidateListBox.BeginUpdate();
+            try
+            {
+                candidateListBox.Items.Clear();
+                foreach (string candidate in candidates)
+                {
+                    candidateListBox.Items.Add(candidate);
+                }
+            }
+            finally
+            {
+                candidateListBox.EndUpdate();
+            }
+
+            if (candidateListBox.Items.Count > 0)
+            {
+                candidateListBox.SelectedIndex = 0;
+                statusLabel.Text = "Found " + candidateListBox.Items.Count.ToString() + " candidate roots. Confirm the target before installing.";
+            }
+            else
+            {
+                SelectedOpenClawRoot = null;
+                selectedPathBox.Text = string.Empty;
+                statusLabel.Text = "No valid OpenClaw root was found automatically. Use Browse to select it manually.";
+            }
+        }
+        finally
+        {
+            UseWaitCursor = false;
+            refreshButton.Enabled = true;
+            browseButton.Enabled = true;
+        }
+    }
+
+    private void ApplyCurrentSelection()
+    {
+        if (candidateListBox.SelectedItem == null)
+        {
+            SelectedOpenClawRoot = null;
+            selectedPathBox.Text = string.Empty;
+            installButton.Enabled = false;
+            return;
+        }
+
+        SelectedOpenClawRoot = Convert.ToString(candidateListBox.SelectedItem);
+        selectedPathBox.Text = SelectedOpenClawRoot;
+        statusLabel.Text = "A target root is selected. Click Install to continue.";
+        installButton.Enabled = !string.IsNullOrWhiteSpace(SelectedOpenClawRoot);
+    }
+
+    private void BrowseForRoot()
+    {
+        using (FolderBrowserDialog dialog = new FolderBrowserDialog())
+        {
+            dialog.Description = "Select the OpenClaw root directory";
+            dialog.ShowNewFolderButton = false;
+            if (dialog.ShowDialog(this) != DialogResult.OK)
+            {
+                return;
+            }
+
+            string resolvedRoot;
+            string message;
+            if (!Program.TryResolveValidOpenClawRoot(dialog.SelectedPath, out resolvedRoot, out message))
+            {
+                MessageBox.Show(this, message, "Invalid Directory", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                statusLabel.Text = message;
+                return;
+            }
+
+            bool exists = false;
+            foreach (object item in candidateListBox.Items)
+            {
+                if (string.Equals(Convert.ToString(item), resolvedRoot, StringComparison.OrdinalIgnoreCase))
+                {
+                    exists = true;
+                    break;
+                }
+            }
+
+            if (!exists)
+            {
+                candidateListBox.Items.Add(resolvedRoot);
+            }
+
+            candidateListBox.SelectedItem = resolvedRoot;
+            SelectedOpenClawRoot = resolvedRoot;
+            selectedPathBox.Text = resolvedRoot;
+            statusLabel.Text = "The selected OpenClaw root is valid and ready for installation.";
+            installButton.Enabled = true;
+        }
+    }
+
+    private void ConfirmInstall()
+    {
+        if (string.IsNullOrWhiteSpace(SelectedOpenClawRoot))
+        {
+            MessageBox.Show(this, "Select a valid OpenClaw root before continuing.", "Cannot Continue", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        DialogResult result = MessageBox.Show(
+            this,
+            "Install \"" + Program.PackName + "\" into the following directory?\r\n\r\n" + SelectedOpenClawRoot + "\r\n\r\nClick Yes to continue.",
+            "Confirm Installation",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Question);
+
+        if (result != DialogResult.Yes)
+        {
+            return;
+        }
+
+        DialogResult = DialogResult.OK;
+        Close();
+    }
+}
+
 internal sealed class ProgressForm : Form
 {
     private readonly Label titleLabel;
@@ -1533,12 +2208,23 @@ internal sealed class ProgressForm : Form
 }
 '@
 
+    $packSkills = @(
+        @(Convert-ToArray -Value (Get-ObjectPropertyValue -Object $WorkflowPack.Manifest -Name "skills")) |
+            ForEach-Object { "- $_" }
+    ) -join "`r`n"
+
     $source = $source.Replace("__UAC_DENIED__", (ConvertTo-CSharpStringLiteral "Administrator permission was not granted. Installation was cancelled."))
     $source = $source.Replace("__ELEVATION_LOOP__", (ConvertTo-CSharpStringLiteral "The installer requested elevation, but administrator rights are still unavailable."))
     $source = $source.Replace("__CLOSE_PROMPT__", (ConvertTo-CSharpStringLiteral "Press any key to close..."))
     $source = $source.Replace("__PAYLOAD_EXTRACT__", (ConvertTo-CSharpStringLiteral "Extracting installer payload"))
     $source = $source.Replace("__PAYLOAD_UNPACK__", (ConvertTo-CSharpStringLiteral "Unpacking installer files"))
     $source = $source.Replace("__STARTING_INSTALL__", (ConvertTo-CSharpStringLiteral "Starting installer"))
+    $source = $source.Replace("__INSTALL_RUNNING__", (ConvertTo-CSharpStringLiteral "Installing workflow package"))
+    $source = $source.Replace("__PACK_NAME__", (ConvertTo-CSharpStringLiteral "$($WorkflowPack.Manifest.displayName)"))
+    $source = $source.Replace("__PACK_DESCRIPTION__", (ConvertTo-CSharpStringLiteral "$($WorkflowPack.Manifest.description)"))
+    $source = $source.Replace("__PACK_SKILLS__", (ConvertTo-CSharpStringLiteral $packSkills))
+    $source = $source.Replace("__INSTALLER_LOCALE__", ($Locale.Replace('\', '\\').Replace('"', '\"')))
+    $source = $source.Replace("__PACK_ID__", ("$($WorkflowPack.Manifest.packId)".Replace('\', '\\').Replace('"', '\"')))
     return $source
 }
 
@@ -1589,7 +2275,7 @@ function New-EmbeddedOneClickExecutable {
     $iconPath = Get-IconAssetPath -FileName "openclaw-installer.ico"
     $compilerOption = Get-Win32IconCompilerOption -IconPath $iconPath
     Compile-CSharpExecutable `
-        -SourceCode (Get-EmbeddedLauncherSource) `
+        -SourceCode (Get-EmbeddedLauncherSource -WorkflowPack $workflowPack) `
         -OutputPath $stubExePath `
         -ReferencedAssemblies @("System.dll", "System.Core.dll", "System.Drawing.dll", "System.Windows.Forms.dll", "System.Web.Extensions.dll", "System.IO.Compression.dll", "System.IO.Compression.FileSystem.dll") `
         -Target "winexe" `
