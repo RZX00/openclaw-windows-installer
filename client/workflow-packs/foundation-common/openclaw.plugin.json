@@ -1,0 +1,11 @@
+{
+  "id": "foundation-common",
+  "name": "Foundation Common",
+  "description": "Shared foundation capability skill pack for the Windows installer.",
+  "skills": ["./skills"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

@@ -1,0 +1,229 @@
+{
+  "schemaVersion": 2,
+  "packId": "foundation-common",
+  "displayName": "Foundation Common",
+  "version": "0.1.0",
+  "pluginId": "foundation-common",
+  "packageName": "@openclaw/foundation-common",
+  "archiveName": "OpenClaw-Workflow-Pack-Foundation-Common.zip",
+  "installerName": "OpenClaw-Workflow-Pack-Foundation-Common.exe",
+  "description": "Shared foundation capability add-on package for Windows.",
+  "skills": [
+    "agent-reach",
+    "clawdefender",
+    "skill-vetter",
+    "security-auditor",
+    "find-skills",
+    "clawFeed",
+    "agent-browser",
+    "self-improving",
+    "proactive-agent",
+    "memory-setup"
+  ],
+  "runtimeProfile": "foundation-runtime-v1",
+  "runtime": {
+    "key": "foundation-runtime",
+    "layout": "foundation-runtime-v1",
+    "commands": [
+      "agent-reach",
+      "xreach",
+      "mcporter",
+      "gh",
+      "git",
+      "bash",
+      "jq",
+      "skills",
+      "agent-browser"
+    ],
+    "nodePackages": [
+      {
+        "name": "xreach-cli",
+        "version": "0.3.3",
+        "command": "xreach"
+      },
+      {
+        "name": "mcporter",
+        "version": "0.7.3",
+        "command": "mcporter"
+      },
+      {
+        "name": "undici",
+        "version": "7.24.3"
+      },
+      {
+        "name": "skills",
+        "version": "1.4.5",
+        "command": "skills"
+      },
+      {
+        "name": "agent-browser",
+        "version": "0.21.2",
+        "command": "agent-browser"
+      }
+    ],
+    "tools": [
+      {
+        "name": "jq",
+        "version": "1.8.1"
+      }
+    ]
+  },
+  "skillSources": [
+    {
+      "skillId": "agent-reach",
+      "targetName": "agent-reach",
+      "kind": "directory",
+      "pathBase": "pack",
+      "path": "../workflow-zone/skills/agent-reach",
+      "expectedHash": "1b0a172ca473f7d0637a73968b0c3acfff2f0fd06dd5a607860de0edd1bb4947",
+      "required": true,
+      "audit": {
+        "mode": "strict"
+      }
+    },
+    {
+      "skillId": "clawdefender",
+      "targetName": "clawdefender",
+      "kind": "directory",
+      "pathBase": "repo",
+      "path": "client/workflow-source-cache/foundation-common/skills/clawdefender",
+      "expectedHash": "b160dd4ba694087315d52c76f16051f73a02b674c3502da71e6e924cd998b459",
+      "required": true,
+      "audit": {
+        "mode": "strict",
+        "allowRuleIds": [
+          "dangerous-shell",
+          "curl-pipe-shell",
+          "wget-pipe-shell",
+          "suspicious-endpoint"
+        ]
+      }
+    },
+    {
+      "skillId": "skill-vetter",
+      "targetName": "skill-vetter",
+      "kind": "directory",
+      "pathBase": "repo",
+      "path": "client/workflow-source-cache/foundation-common/skills/skill-vetter",
+      "expectedHash": "1f4b5fda093abac7bded62d4a1ef1a26306c8d9d38f5bfc4335d72db13c5fb73",
+      "required": true,
+      "audit": {
+        "mode": "strict"
+      }
+    },
+    {
+      "skillId": "security-auditor",
+      "targetName": "security-auditor",
+      "kind": "directory",
+      "pathBase": "repo",
+      "path": "client/workflow-source-cache/foundation-common/skills/security-auditor",
+      "expectedHash": "9f4044b270364013c60ec7f1ad3b341f7a6e8de9536fa465e87ba0d6ee1bcee6",
+      "required": true,
+      "audit": {
+        "mode": "strict"
+      }
+    },
+    {
+      "skillId": "find-skills",
+      "targetName": "find-skills",
+      "kind": "directory",
+      "pathBase": "repo",
+      "path": "client/workflow-source-cache/foundation-common/skills/find-skills",
+      "expectedHash": "54965b1d3b283f5412a93885dbcb11d22ecc512554af4258140741e25b43ee6f",
+      "required": true,
+      "audit": {
+        "mode": "strict"
+      }
+    },
+    {
+      "skillId": "clawFeed",
+      "targetName": "clawFeed",
+      "kind": "github-archive",
+      "repository": "kevinho/clawfeed",
+      "ref": "38b43f0c3d5c781acbc3173a3a4a47f480cb18a5",
+      "archiveSha256": "b989e08975fafca9263333298795996f793c48f3c7fa0931c5bebaf350b4af2b",
+      "expectedHash": "fa2e36f8740b5266403ec7a3e5703b454e44e32d3b5db34c05d5a94d67ef4bb4",
+      "relativePath": ".",
+      "required": true,
+      "audit": {
+        "mode": "strict"
+      },
+      "buildSteps": [
+        {
+          "type": "npm-install",
+          "production": true
+        }
+      ]
+    },
+    {
+      "skillId": "agent-browser",
+      "targetName": "agent-browser",
+      "kind": "github-archive",
+      "repository": "vercel-labs/agent-browser",
+      "ref": "fa563b59b97345178a1ac3f0c720be8ca6c98bc4",
+      "archiveSha256": "8b9f258dd112e94fe32fcfe02c58497c9caca7fa2142be061ed5b4903f16723a",
+      "expectedHash": "3786018219efba3dbfe10d43c2f6713bc7375a08aa6da4453a41cae84a47e821",
+      "relativePath": "skills/agent-browser",
+      "required": true,
+      "audit": {
+        "mode": "strict"
+      }
+    },
+    {
+      "skillId": "self-improving",
+      "targetName": "self-improving",
+      "kind": "directory",
+      "pathBase": "repo",
+      "path": "client/workflow-source-cache/foundation-common/skills/self-improving",
+      "expectedHash": "5b137af6ac7b1a35b845ccada31e21da4623f79fc02f9d036f3b13e576ad7536",
+      "required": true,
+      "audit": {
+        "mode": "strict"
+      }
+    },
+    {
+      "skillId": "proactive-agent",
+      "targetName": "proactive-agent",
+      "kind": "unresolved",
+      "required": true,
+      "reason": "Authoritative upstream source has not been confirmed yet."
+    },
+    {
+      "skillId": "memory-setup",
+      "targetName": "memory-setup",
+      "kind": "unresolved",
+      "required": true,
+      "reason": "Authoritative upstream source has not been confirmed yet."
+    }
+  ],
+  "provisioning": [],
+  "prerequisites": [
+    {
+      "id": "skills-cli",
+      "type": "command-available",
+      "command": "skills",
+      "severity": "error",
+      "message": "The bundled Skills CLI must be available from the foundation runtime."
+    },
+    {
+      "id": "agent-browser-cli",
+      "type": "command-available",
+      "command": "agent-browser",
+      "severity": "error",
+      "message": "The bundled agent-browser CLI must be available from the foundation runtime."
+    },
+    {
+      "id": "clawdefender-shell",
+      "type": "command-available",
+      "command": "bash",
+      "severity": "warning",
+      "message": "bash must be available for clawdefender script execution."
+    },
+    {
+      "id": "agent-browser-operator-setup",
+      "type": "manual-step",
+      "severity": "warning",
+      "message": "agent-browser may still require browser extension enablement or operator sign-in before first real task."
+    }
+  ]
+}
