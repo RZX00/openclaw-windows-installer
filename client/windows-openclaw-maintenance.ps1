@@ -368,6 +368,15 @@ function Get-DefaultCapabilities {
     }
 }
 
+function Get-FullModernCapabilityPreset {
+    $preset = Get-DefaultCapabilities
+    foreach ($key in @($preset.Keys)) {
+        $preset[$key] = $true
+    }
+
+    return $preset
+}
+
 function Get-CapabilityPresetForRuntimeVersion {
     param([string]$RuntimeVersion)
 
@@ -376,19 +385,25 @@ function Get-CapabilityPresetForRuntimeVersion {
         return $null
     }
 
-    # The bundled modern Windows runtime exposes the commands required by the
-    # one-click maintenance flow. Prefer a version preset over cold-start help probes.
-    $presetFloorVersion = "2026.3.13"
-    if ((Compare-ReleaseVersions -Left $normalizedRuntimeVersion -Right $presetFloorVersion) -lt 0) {
+    # Keep presets bound to explicit runtime versions so unknown future CLI
+    # releases fall back to probing instead of inheriting stale assumptions.
+    $presetNameByVersion = [ordered]@{
+        "2026.3.13" = "full-modern"
+    }
+
+    $presetName = $presetNameByVersion[$normalizedRuntimeVersion]
+    if ([string]::IsNullOrWhiteSpace("$presetName")) {
         return $null
     }
 
-    $preset = Get-DefaultCapabilities
-    foreach ($key in @($preset.Keys)) {
-        $preset[$key] = $true
+    switch ($presetName) {
+        "full-modern" {
+            return (Get-FullModernCapabilityPreset)
+        }
+        default {
+            return $null
+        }
     }
-
-    return $preset
 }
 
 function Test-CapabilityStateHasEnabledFlags {
@@ -3437,6 +3452,356 @@ function Get-ConfigTextValue {
     }
 }
 
+function Get-ConfigBooleanValue {
+    param(
+        [string]$Key,
+        [bool]$Default = $false,
+        [int]$TimeoutSeconds = 30
+    )
+
+    $result = Get-ConfigTextValue -Key $Key -TimeoutSeconds $TimeoutSeconds
+    if (-not $result.Success -or $result.TimedOut -or $result.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace("$($result.Value)")) {
+        return $Default
+    }
+
+    $text = "$($result.Value)".Trim()
+    try {
+        $parsed = $text | ConvertFrom-Json -ErrorAction Stop
+        if ($parsed -is [bool]) {
+            return [bool]$parsed
+        }
+    } catch {}
+
+    switch ($text.ToLowerInvariant()) {
+        "true" { return $true }
+        "1" { return $true }
+        "false" { return $false }
+        "0" { return $false }
+        default { return $Default }
+    }
+}
+
+function Set-ConfigJsonValue {
+    param(
+        [string]$Key,
+        [object]$Value,
+        [int]$TimeoutSeconds = 60
+    )
+
+    try {
+        $jsonValue = ConvertTo-Json -InputObject $Value -Compress -Depth 16
+        $result = Invoke-OpenClaw -Arguments @("config", "set", $Key, $jsonValue, "--strict-json") -TimeoutSeconds $TimeoutSeconds
+        return [pscustomobject]@{
+            Success  = (-not $result.TimedOut -and $result.ExitCode -eq 0)
+            ExitCode = $result.ExitCode
+            TimedOut = [bool]$result.TimedOut
+            Summary  = Get-CommandResultSummary -Result $result -SuccessFallback "Config value updated." -FailureFallback "Config update returned a non-zero exit code."
+            Output   = @($result.Output)
+        }
+    } catch {
+        Write-Log -Level "WARN" -Message ("Failed to update config key '{0}': {1}" -f $Key, $_.Exception.Message)
+        return [pscustomobject]@{
+            Success  = $false
+            ExitCode = 1
+            TimedOut = $false
+            Summary  = $_.Exception.Message
+            Output   = @()
+        }
+    }
+}
+
+function Get-OpenClawUserHomePath {
+    $specialHome = $null
+    try {
+        $specialHome = [Environment]::GetFolderPath("UserProfile")
+    } catch {}
+
+    $candidates = @(
+        $env:USERPROFILE,
+        $env:HOME,
+        $HOME,
+        $(if (-not [string]::IsNullOrWhiteSpace("$($env:HOMEDRIVE)$($env:HOMEPATH)")) { "$($env:HOMEDRIVE)$($env:HOMEPATH)" } else { $null }),
+        $specialHome
+    )
+
+    foreach ($candidate in $candidates) {
+        if ([string]::IsNullOrWhiteSpace("$candidate")) {
+            continue
+        }
+
+        try {
+            $expanded = [Environment]::ExpandEnvironmentVariables("$candidate").Trim()
+            if ([string]::IsNullOrWhiteSpace($expanded)) {
+                continue
+            }
+
+            return [IO.Path]::GetFullPath($expanded)
+        } catch {}
+    }
+
+    return $null
+}
+
+function Get-DefaultWorkspacePath {
+    $homePath = Get-OpenClawUserHomePath
+    if ([string]::IsNullOrWhiteSpace($homePath)) {
+        return $null
+    }
+
+    $profileSuffix = "workspace"
+    $profileName = [Environment]::GetEnvironmentVariable("OPENCLAW_PROFILE")
+    if (-not [string]::IsNullOrWhiteSpace("$profileName") -and -not [string]::Equals("$profileName", "default", [System.StringComparison]::OrdinalIgnoreCase)) {
+        $profileSuffix = "workspace-{0}" -f $profileName.Trim()
+    }
+
+    return (Join-Path (Join-Path $homePath ".openclaw") $profileSuffix)
+}
+
+function Resolve-WorkspacePathValue {
+    param([string]$PathText)
+
+    if ([string]::IsNullOrWhiteSpace($PathText)) {
+        return $null
+    }
+
+    $candidate = [Environment]::ExpandEnvironmentVariables($PathText.Trim())
+    if ($candidate.StartsWith("~")) {
+        $homePath = Get-OpenClawUserHomePath
+        if ([string]::IsNullOrWhiteSpace($homePath)) {
+            return $null
+        }
+
+        $suffix = $candidate.Substring(1).TrimStart('\', '/')
+        $candidate = if ([string]::IsNullOrWhiteSpace($suffix)) { $homePath } else { Join-Path $homePath $suffix }
+    }
+
+    try {
+        return [IO.Path]::GetFullPath($candidate)
+    } catch {
+        Write-Log -Level "WARN" -Message ("Failed to normalize workspace path '{0}': {1}" -f $PathText, $_.Exception.Message)
+        return $null
+    }
+}
+
+function Get-WorkspaceBootstrapFileNames {
+    return @(
+        "AGENTS.md",
+        "SOUL.md",
+        "TOOLS.md",
+        "IDENTITY.md",
+        "USER.md",
+        "HEARTBEAT.md"
+    )
+}
+
+function Get-MissingWorkspaceBootstrapFiles {
+    param([string]$WorkspacePath)
+
+    $missing = New-Object System.Collections.Generic.List[string]
+    if ([string]::IsNullOrWhiteSpace($WorkspacePath)) {
+        return @($missing.ToArray())
+    }
+
+    foreach ($fileName in @(Get-WorkspaceBootstrapFileNames)) {
+        if (-not (Test-Path -LiteralPath (Join-Path $WorkspacePath $fileName))) {
+            $missing.Add($fileName) | Out-Null
+        }
+    }
+
+    return @($missing.ToArray())
+}
+
+function Run-WorkspaceSetup {
+    param([string]$WorkspacePath)
+
+    if ([string]::IsNullOrWhiteSpace($WorkspacePath)) {
+        return [pscustomobject]@{
+            Attempted = $false
+            Success   = $false
+            Summary   = "Workspace path is empty."
+        }
+    }
+
+    Write-UiStatus -Level "info" -Message "Recreating missing workspace bootstrap files..."
+    Write-Log -Level "INFO" -Message ("Running openclaw setup --workspace '{0}' for workspace self-heal." -f $WorkspacePath)
+    try {
+        $result = Invoke-OpenClaw -Arguments @("setup", "--workspace", $WorkspacePath) -TimeoutSeconds 180
+        return [pscustomobject]@{
+            Attempted = $true
+            Success   = (-not $result.TimedOut -and $result.ExitCode -eq 0)
+            Summary   = Get-CommandResultSummary -Result $result -SuccessFallback "Workspace setup completed." -FailureFallback "Workspace setup returned a non-zero exit code."
+        }
+    } catch {
+        Write-Log -Level "WARN" -Message ("Workspace setup failed: {0}" -f $_.Exception.Message)
+        return [pscustomobject]@{
+            Attempted = $true
+            Success   = $false
+            Summary   = $_.Exception.Message
+        }
+    }
+}
+
+function Run-ConfigValidate {
+    try {
+        $result = Invoke-OpenClaw -Arguments @("config", "validate") -TimeoutSeconds 90
+        return [pscustomobject]@{
+            Attempted = $true
+            Success   = (-not $result.TimedOut -and $result.ExitCode -eq 0)
+            Summary   = Get-CommandResultSummary -Result $result -SuccessFallback "Config validation passed." -FailureFallback "Config validation returned a non-zero exit code."
+        }
+    } catch {
+        Write-Log -Level "WARN" -Message ("Config validation failed to start: {0}" -f $_.Exception.Message)
+        return [pscustomobject]@{
+            Attempted = $true
+            Success   = $false
+            Summary   = $_.Exception.Message
+        }
+    }
+}
+
+function Invoke-WorkspaceSelfHeal {
+    $actions = New-Object System.Collections.Generic.List[string]
+    $warnings = New-Object System.Collections.Generic.List[string]
+
+    $defaultWorkspacePath = Resolve-WorkspacePathValue -PathText (Get-DefaultWorkspacePath)
+    $workspaceConfigResult = Get-ConfigTextValue -Key "agents.defaults.workspace"
+    $workspaceConfigReadable = ($workspaceConfigResult.Success -and -not $workspaceConfigResult.TimedOut -and $workspaceConfigResult.ExitCode -eq 0)
+    $configuredWorkspaceText = if ($workspaceConfigReadable) { "$($workspaceConfigResult.Value)" } else { $null }
+    $workspacePath = Resolve-WorkspacePathValue -PathText $configuredWorkspaceText
+    $configRepairNeeded = $false
+
+    if ([string]::IsNullOrWhiteSpace($configuredWorkspaceText)) {
+        $configRepairNeeded = $true
+        $workspacePath = $defaultWorkspacePath
+        $warnings.Add("Workspace config is missing. Falling back to the default workspace path.") | Out-Null
+    } elseif ([string]::IsNullOrWhiteSpace($workspacePath)) {
+        $configRepairNeeded = $true
+        $workspacePath = $defaultWorkspacePath
+        $warnings.Add("Configured workspace path could not be normalized. Falling back to the default workspace path.") | Out-Null
+    }
+
+    if (-not $workspaceConfigReadable) {
+        $configRepairNeeded = $true
+        $warnings.Add(("Workspace config could not be read cleanly (exitCode={0}). Falling back to the default workspace path." -f $workspaceConfigResult.ExitCode)) | Out-Null
+        if (-not [string]::IsNullOrWhiteSpace($defaultWorkspacePath)) {
+            $workspacePath = $defaultWorkspacePath
+        }
+    }
+
+    $skipBootstrap = Get-ConfigBooleanValue -Key "agents.defaults.skipBootstrap" -Default $false
+    $workspaceExistsBefore = (-not [string]::IsNullOrWhiteSpace($workspacePath) -and (Test-Path -LiteralPath $workspacePath -PathType Container))
+
+    if (-not [string]::IsNullOrWhiteSpace($workspacePath) -and -not $workspaceExistsBefore) {
+        try {
+            Ensure-Directory -Path $workspacePath
+            if (Test-Path -LiteralPath $workspacePath -PathType Container) {
+                $actions.Add(("Created workspace directory: {0}" -f $workspacePath)) | Out-Null
+            } else {
+                $warnings.Add(("Workspace directory is still missing after creation attempt: {0}" -f $workspacePath)) | Out-Null
+            }
+        } catch {
+            $warnings.Add(("Failed to create workspace directory '{0}': {1}" -f $workspacePath, $_.Exception.Message)) | Out-Null
+        }
+    }
+
+    if ($configRepairNeeded -and -not [string]::IsNullOrWhiteSpace($workspacePath)) {
+        $setWorkspaceResult = Set-ConfigJsonValue -Key "agents.defaults.workspace" -Value $workspacePath
+        if ($setWorkspaceResult.Success) {
+            $actions.Add(("Updated agents.defaults.workspace to {0}" -f $workspacePath)) | Out-Null
+        } else {
+            $warnings.Add(("Failed to update agents.defaults.workspace automatically: {0}" -f $setWorkspaceResult.Summary)) | Out-Null
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($workspacePath) -and (Test-Path -LiteralPath $workspacePath -PathType Container)) {
+        $memoryPath = Join-Path $workspacePath "memory"
+        if (-not (Test-Path -LiteralPath $memoryPath -PathType Container)) {
+            try {
+                Ensure-Directory -Path $memoryPath
+                if (Test-Path -LiteralPath $memoryPath -PathType Container) {
+                    $actions.Add(("Created workspace memory directory: {0}" -f $memoryPath)) | Out-Null
+                }
+            } catch {
+                $warnings.Add(("Failed to create workspace memory directory '{0}': {1}" -f $memoryPath, $_.Exception.Message)) | Out-Null
+            }
+        }
+    }
+
+    $missingBootstrapBefore = @()
+    $missingBootstrapAfter = @()
+    $setupResult = [pscustomobject]@{
+        Attempted = $false
+        Success   = $true
+        Summary   = "Workspace setup was not required."
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($workspacePath)) {
+        $missingBootstrapBefore = Get-MissingWorkspaceBootstrapFiles -WorkspacePath $workspacePath
+    }
+
+    $shouldRunSetup = (-not $skipBootstrap) -and (-not [string]::IsNullOrWhiteSpace($workspacePath)) -and ($configRepairNeeded -or -not $workspaceExistsBefore -or $missingBootstrapBefore.Count -gt 0)
+    if ($shouldRunSetup) {
+        $setupResult = Run-WorkspaceSetup -WorkspacePath $workspacePath
+        if ($setupResult.Success) {
+            $actions.Add("Re-seeded workspace bootstrap files via openclaw setup.") | Out-Null
+        } else {
+            $warnings.Add(("Workspace setup did not complete cleanly: {0}" -f $setupResult.Summary)) | Out-Null
+        }
+    } elseif ($skipBootstrap) {
+        Write-Log -Level "INFO" -Message "Workspace bootstrap repair was skipped because agents.defaults.skipBootstrap is enabled."
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($workspacePath) -and -not $skipBootstrap) {
+        $missingBootstrapAfter = Get-MissingWorkspaceBootstrapFiles -WorkspacePath $workspacePath
+    }
+
+    $configValidateResult = Run-ConfigValidate
+    if ($configValidateResult.Attempted) {
+        if ($configValidateResult.Success) {
+            $actions.Add("Validated active OpenClaw config.") | Out-Null
+        } else {
+            $warnings.Add(("Config validation still reports issues: {0}" -f $configValidateResult.Summary)) | Out-Null
+        }
+    }
+
+    foreach ($warning in @($warnings.ToArray())) {
+        Write-Log -Level "WARN" -Message ("Workspace self-heal warning: {0}" -f $warning)
+    }
+
+    foreach ($action in @($actions.ToArray())) {
+        Write-Log -Level "INFO" -Message ("Workspace self-heal action: {0}" -f $action)
+    }
+
+    $workspaceAvailable = (-not [string]::IsNullOrWhiteSpace($workspacePath) -and (Test-Path -LiteralPath $workspacePath -PathType Container))
+    $blockingFailure = (-not $workspaceAvailable)
+    $healthy = ($workspaceAvailable -and ($skipBootstrap -or $missingBootstrapAfter.Count -eq 0))
+    $summary = if ($blockingFailure) {
+        "Workspace auto-repair could not create a usable workspace directory."
+    } elseif ($healthy -and $actions.Count -eq 0) {
+        "Workspace path and bootstrap files are already healthy."
+    } elseif ($healthy) {
+        "Workspace auto-repair completed."
+    } else {
+        "Workspace directory is available, but some bootstrap files are still missing."
+    }
+
+    return [pscustomobject]@{
+        Success                = $workspaceAvailable
+        Healthy                = $healthy
+        BlockingFailure        = $blockingFailure
+        WorkspacePath          = $workspacePath
+        SkipBootstrap          = $skipBootstrap
+        ConfigRepairNeeded     = $configRepairNeeded
+        MissingBootstrapBefore = @($missingBootstrapBefore)
+        MissingBootstrapAfter  = @($missingBootstrapAfter)
+        Actions                = @($actions.ToArray())
+        Warnings               = @($warnings.ToArray())
+        SetupResult            = $setupResult
+        ConfigValidateResult   = $configValidateResult
+        Summary                = $summary
+    }
+}
+
 function Get-GatewayTokenSource {
     param([string]$TokenText)
 
@@ -5250,14 +5615,47 @@ function Invoke-RepairMode {
     [void](Get-DaemonStatus -EmitUiStatus)
     Collect-StatusDiagnostics
 
-    Write-UiPhase -Key "repair.restart" -Title "Restarting the Gateway" -Progress 35 -Message "Trying to restart the Gateway..."
+    Write-UiPhase -Key "repair.workspace" -Title "Repairing workspace state" -Progress 30 -Message "Checking the workspace path and bootstrap files..."
+    $workspaceRepair = Invoke-WorkspaceSelfHeal
+    Persist-InstallState -StateUpdates ([ordered]@{
+        lastWorkspaceRepair = [pscustomobject]@{
+            checkedAt              = (Get-Date).ToString("o")
+            workspacePath          = $workspaceRepair.WorkspacePath
+            success                = [bool]$workspaceRepair.Success
+            healthy                = [bool]$workspaceRepair.Healthy
+            blockingFailure        = [bool]$workspaceRepair.BlockingFailure
+            skipBootstrap          = [bool]$workspaceRepair.SkipBootstrap
+            missingBootstrapBefore = @($workspaceRepair.MissingBootstrapBefore)
+            missingBootstrapAfter  = @($workspaceRepair.MissingBootstrapAfter)
+            actions                = @($workspaceRepair.Actions)
+            warnings               = @($workspaceRepair.Warnings)
+            summary                = $workspaceRepair.Summary
+        }
+    })
+
+    if ($workspaceRepair.BlockingFailure) {
+        Write-Log -Level "ERROR" -Message ("Workspace self-heal failed: {0}" -f $workspaceRepair.Summary)
+        return (Complete-Maintenance -Code $script:ExitCodes.NeedsAttention -Message "Workspace auto-repair could not recover a usable workspace." -Reason "repair_workspace_unavailable" -Summary $workspaceRepair.Summary -NextAction "Verify the workspace path and Windows folder permissions, then run Repair again." -RecoveryCommand "openclaw config get agents.defaults.workspace" -InstalledVersion $installedVersion.NormalizedVersion -StateUpdates ([ordered]@{
+            lastStartReason   = "repair_workspace_unavailable"
+            lastDashboardMode = "none"
+            startMode         = $startMode
+        }))
+    }
+
+    if (-not $workspaceRepair.Healthy) {
+        Write-UiStatus -Level "warn" -Message $workspaceRepair.Summary
+    } elseif ($workspaceRepair.Actions.Count -gt 0) {
+        Write-UiStatus -Level "info" -Message $workspaceRepair.Summary
+    }
+
+    Write-UiPhase -Key "repair.restart" -Title "Restarting the Gateway" -Progress 40 -Message "Trying to restart the Gateway..."
     $readyResult = Ensure-PersistentGatewayReady -AllowConsoleFallback
     if ($readyResult.Ready) {
         Write-UiPhase -Key "repair.verify" -Title "Verifying repair result" -Progress 100 -Message "Restart finished. Confirming Gateway health..."
         return (Finalize-OperationalReadiness -InstalledVersion $installedVersion.NormalizedVersion -StartMode $startMode -SuccessCode $script:ExitCodes.Success -SuccessMessage $(if ($readyResult.UsedConsoleFallback) { "Repair finished, and a persistent OpenClaw console window was opened." } else { "Repair finished, and the Gateway/dashboard post-checks passed." }) -SuccessReason "repair_restart_completed" -SuccessSummary "The repair flow passed the unified post-validation after restart.")
     }
 
-    Write-UiPhase -Key "repair.doctor" -Title "Running doctor checks" -Progress 60 -Message "Running doctor checks..."
+    Write-UiPhase -Key "repair.doctor" -Title "Running doctor checks" -Progress 65 -Message "Running doctor checks..."
     [void](Run-Doctor)
 
     $readyResult = Ensure-PersistentGatewayReady -AllowConsoleFallback
@@ -5270,7 +5668,7 @@ function Invoke-RepairMode {
         return (Finalize-OperationalReadiness -InstalledVersion $installedVersion.NormalizedVersion -StartMode $startMode -SuccessCode $script:ExitCodes.Success -SuccessMessage $(if ($readyResult.UsedConsoleFallback) { "Doctor repair finished, and a persistent OpenClaw console window was opened." } else { "Doctor repair finished, and the Gateway/dashboard post-checks passed." }) -SuccessReason "repair_doctor_completed" -SuccessSummary "The unified post-validation passed after Doctor repair.")
     }
 
-    Write-UiPhase -Key "repair.gateway-install" -Title "Reinstalling the Gateway service" -Progress 80 -Message "Reinstalling the Gateway service..."
+    Write-UiPhase -Key "repair.gateway-install" -Title "Reinstalling the Gateway service" -Progress 82 -Message "Reinstalling the Gateway service..."
     [void](Run-GatewayInstallForce)
 
     $readyResult = Ensure-PersistentGatewayReady -AllowConsoleFallback
