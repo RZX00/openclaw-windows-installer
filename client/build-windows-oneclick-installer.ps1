@@ -269,7 +269,10 @@ function New-BundleManifestObject {
         [string]$Version,
         [string]$PackageTag,
         [string]$NodeVersion,
-        [string]$CommandRelativePath
+        [string]$CommandRelativePath,
+        [bool]$OverlayApplied = $false,
+        [string]$OverlayRevision = "",
+        [string]$OverlayTargetVersion = ""
     )
 
     return [ordered]@{
@@ -282,6 +285,9 @@ function New-BundleManifestObject {
         commandRelativePath = $CommandRelativePath
         bundleFile          = $BundleFileName
         bundleSha256        = ""
+        overlayApplied      = $OverlayApplied
+        overlayRevision     = $OverlayRevision
+        overlayTargetVersion = $OverlayTargetVersion
         createdAt           = (Get-Date).ToString("o")
     }
 }
@@ -296,6 +302,44 @@ function Save-Json {
 function Compute-Sha256 {
     param([string]$Path)
     return (Get-FileHash -Path $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Invoke-OpenClawBundleOverlay {
+    param(
+        [string]$BundleRoot,
+        [string]$NodeExe
+    )
+
+    if ($DryRun) {
+        return [pscustomobject]@{
+            overlayApplied       = $true
+            overlayRevision      = "dry-run"
+            overlayTargetVersion = "dry-run"
+        }
+    }
+
+    $overlayScript = Join-Path $PSScriptRoot "tools\\apply-openclaw-overlay.mjs"
+    if (-not (Test-Path -LiteralPath $overlayScript)) {
+        Write-Err ("Overlay helper was not found: {0}" -f $overlayScript)
+    }
+
+    $metadataPath = Join-Path $BundleRoot "openclaw-overlay.json"
+    try {
+        & $NodeExe $overlayScript --bundle-root $BundleRoot --metadata-file $metadataPath 2>&1 | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            throw "OpenClaw overlay helper returned exit code $LASTEXITCODE."
+        }
+
+        if (-not (Test-Path -LiteralPath $metadataPath)) {
+            throw "OpenClaw overlay helper did not produce metadata."
+        }
+
+        return (Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json)
+    } finally {
+        if (Test-Path -LiteralPath $metadataPath) {
+            Remove-Item -LiteralPath $metadataPath -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 function Remove-FileWithRetry {
@@ -566,6 +610,8 @@ function Build-BundleFromScratch {
         }
     }
 
+    $overlayMetadata = Invoke-OpenClawBundleOverlay -BundleRoot $bundleRoot -NodeExe $nodeExe
+
     if (-not $DryRun -and -not (Test-Path -LiteralPath (Join-Path $bundleRoot "openclaw.cmd"))) {
         Write-Err "openclaw.cmd was not produced in the bundle root."
     }
@@ -574,7 +620,7 @@ function Build-BundleFromScratch {
     }
 
     $packageVersion = if ($DryRun) { "dry-run" } else { ((Get-Content (Join-Path $bundleRoot "node_modules\\openclaw\\package.json") -Raw | ConvertFrom-Json).version) }
-    $manifest = New-BundleManifestObject -BundleFileName ([IO.Path]::GetFileName($zipOutput)) -Version $packageVersion -PackageTag $profile.PackageTag -NodeVersion $profile.NodeVersion -CommandRelativePath "openclaw.cmd"
+    $manifest = New-BundleManifestObject -BundleFileName ([IO.Path]::GetFileName($zipOutput)) -Version $packageVersion -PackageTag $profile.PackageTag -NodeVersion $profile.NodeVersion -CommandRelativePath "openclaw.cmd" -OverlayApplied ([bool]$overlayMetadata.overlayApplied) -OverlayRevision "$($overlayMetadata.overlayRevision)" -OverlayTargetVersion "$($overlayMetadata.overlayTargetVersion)"
 
     if (-not $DryRun) {
         if (Test-Path -LiteralPath $zipOutput) { Remove-Item -LiteralPath $zipOutput -Force }

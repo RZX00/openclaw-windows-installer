@@ -2163,6 +2163,7 @@ function Write-CommandWrapper {
     if ($Type -eq "node") {
         $wrapper = @"
 @echo off
+chcp 65001 >nul
 setlocal
 $bootstrap
 $licenseBootstrap
@@ -2172,6 +2173,7 @@ exit /b %ERRORLEVEL%
     } else {
         $wrapper = @"
 @echo off
+chcp 65001 >nul
 setlocal
 $bootstrap
 $licenseBootstrap
@@ -4383,8 +4385,8 @@ function Start-PersistentGatewayConsole {
     $consoleScriptPath = Join-Path $supportDir "OpenClaw-Gateway-Persistent.cmd"
     $scriptLines = @(
         "@echo off",
-        "setlocal",
         "chcp 65001 >nul",
+        "setlocal",
         "title OpenClaw Gateway Persistent Console",
         "echo [OpenClaw] Persistent Gateway window opened.",
         "echo [OpenClaw] Keep this window open to keep the Gateway online.",

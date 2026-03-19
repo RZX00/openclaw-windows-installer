@@ -2803,6 +2803,7 @@ function Install-Wrapper {
     if ($script:Installer.CommandType -eq "node") {
         $wrapper = @"
 @echo off
+chcp 65001 >nul
 setlocal
 $bootstrap
 $licenseBootstrap
@@ -2812,6 +2813,7 @@ exit /b %ERRORLEVEL%
     } else {
         $wrapper = @"
 @echo off
+chcp 65001 >nul
 setlocal
 $bootstrap
 $licenseBootstrap
@@ -2844,6 +2846,7 @@ function Install-CompanionWrappers {
         if ($command.Type -eq "node") {
             $wrapper = @"
 @echo off
+chcp 65001 >nul
 setlocal
 $bootstrap
 $licenseBootstrap
@@ -2853,6 +2856,7 @@ exit /b %ERRORLEVEL%
         } else {
             $wrapper = @"
 @echo off
+chcp 65001 >nul
 setlocal
 $bootstrap
 $licenseBootstrap
