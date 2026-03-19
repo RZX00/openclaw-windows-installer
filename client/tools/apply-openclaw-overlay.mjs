@@ -74,20 +74,28 @@ function expectMatches(distFiles, pattern, label) {
 
 function injectUtf8CodePage(cmdPath) {
   const raw = fs.readFileSync(cmdPath, "utf8");
-  const headerMatch = raw.match(/^\ufeff?@echo off\r?\n/i);
-  if (!headerMatch) {
-    fail(`Cannot patch ${cmdPath}: missing "@echo off" header.`);
-  }
+  const hasBom = raw.startsWith("\ufeff");
+  const body = hasBom ? raw.slice(1) : raw;
+  const newline = body.includes("\r\n") ? "\r\n" : "\n";
+  const lines = body.split(/\r?\n/);
 
-  const newline = headerMatch[0].endsWith("\r\n") ? "\r\n" : "\n";
-  const insertion = `chcp 65001 >nul${newline}`;
-  const prefixLength = headerMatch[0].length;
-  const currentBody = raw.slice(prefixLength);
-  if (currentBody.startsWith(insertion)) {
+  if (
+    lines.some((line) => {
+      const normalized = line.trim().toLowerCase();
+      return normalized === "chcp 65001 >nul" || normalized === "@chcp 65001 >nul";
+    })
+  ) {
     return false;
   }
 
-  const next = raw.slice(0, prefixLength) + insertion + currentBody;
+  const echoOffIndex = lines.findIndex((line) => line.trim().toLowerCase() === "@echo off");
+  const insertionIndex = echoOffIndex >= 0 ? echoOffIndex + 1 : 0;
+  lines.splice(insertionIndex, 0, "@chcp 65001 >nul");
+
+  let next = lines.join(newline);
+  if (hasBom) {
+    next = `\ufeff${next}`;
+  }
   fs.writeFileSync(cmdPath, next, "utf8");
   return true;
 }
