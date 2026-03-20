@@ -30,6 +30,45 @@ function Write-Warn($Message) { Write-Host "[WARN] $Message" -ForegroundColor Ye
 function Write-Note($Message) { Write-Host "[NOTE] $Message" -ForegroundColor Gray }
 function Write-Err($Message) { Write-Host "[ERROR] $Message" -ForegroundColor Red; throw $Message }
 
+function Get-NormalizedWindowsPathExt {
+    $defaultEntries = @(".COM", ".EXE", ".BAT", ".CMD", ".VBS", ".JS", ".WS", ".MSC")
+    $entries = New-Object System.Collections.Generic.List[string]
+
+    foreach ($entry in @([string]$env:PATHEXT -split ';')) {
+        $trimmed = $entry.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed)) {
+            continue
+        }
+
+        $normalized = $trimmed.ToUpperInvariant()
+        if (-not $entries.Contains($normalized)) {
+            $entries.Add($normalized) | Out-Null
+        }
+    }
+
+    foreach ($entry in $defaultEntries) {
+        if (-not $entries.Contains($entry)) {
+            $entries.Add($entry) | Out-Null
+        }
+    }
+
+    return ($entries.ToArray() -join ';')
+}
+
+function Normalize-WindowsCommandEnvironment {
+    $normalizedPathExt = Get-NormalizedWindowsPathExt
+    if ($env:PATHEXT -ne $normalizedPathExt) {
+        Write-Note ("Normalizing PATHEXT for child processes: {0}" -f $normalizedPathExt)
+        $env:PATHEXT = $normalizedPathExt
+    }
+
+    $defaultComSpec = Join-Path $env:WINDIR 'System32\cmd.exe'
+    if ([string]::IsNullOrWhiteSpace($env:ComSpec) -or -not (Test-Path -LiteralPath $env:ComSpec -PathType Leaf)) {
+        Write-Note ("Normalizing ComSpec for child processes: {0}" -f $defaultComSpec)
+        $env:ComSpec = $defaultComSpec
+    }
+}
+
 function Ensure-Directory {
     param([string]$Path)
 
@@ -357,21 +396,6 @@ function Resolve-CommandPath {
     return $null
 }
 
-function Quote-CmdArgument {
-    param([string]$Value)
-
-    if ($null -eq $Value) {
-        return '""'
-    }
-
-    $text = [string]$Value
-    if ($text -notmatch '[\s"]') {
-        return $text
-    }
-
-    return '"' + $text.Replace('"', '\"') + '"'
-}
-
 function Invoke-External {
     param(
         [string]$FilePath,
@@ -387,12 +411,7 @@ function Invoke-External {
     $stderrPath = Join-Path $script:BuildRoot ("process-" + [guid]::NewGuid().ToString("N") + ".stderr.log")
     $process = $null
     try {
-        if ($FilePath -match '\.(cmd|bat)$') {
-            $commandLine = '"' + $FilePath + '" ' + (($Arguments | ForEach-Object { Quote-CmdArgument -Value $_ }) -join ' ')
-            $process = Start-Process -FilePath "cmd.exe" -ArgumentList @("/d", "/s", "/c", $commandLine) -WorkingDirectory $effectiveWorkingDirectory -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -NoNewWindow -PassThru -Wait
-        } else {
-            $process = Start-Process -FilePath $FilePath -ArgumentList $Arguments -WorkingDirectory $effectiveWorkingDirectory -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -NoNewWindow -PassThru -Wait
-        }
+        $process = Start-Process -FilePath $FilePath -ArgumentList $Arguments -WorkingDirectory $effectiveWorkingDirectory -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -NoNewWindow -PassThru -Wait
     } finally {
         if (Test-Path -LiteralPath $stdoutPath) {
             Get-Content -LiteralPath $stdoutPath -ErrorAction SilentlyContinue | Out-Host
@@ -616,15 +635,24 @@ function Invoke-SkillSourceBuildSteps {
                     Write-Err ("npm is required to materialize skill build step in {0}." -f $WorkingDirectory)
                 }
 
-                $arguments = @("install", "--no-fund", "--no-audit")
+                $nodeModulesPath = Join-Path $WorkingDirectory 'node_modules'
+                if (Test-Path -LiteralPath $nodeModulesPath -PathType Container) {
+                    Remove-Item -LiteralPath $nodeModulesPath -Recurse -Force -ErrorAction SilentlyContinue
+                }
+
+                $lockFilePath = Join-Path $WorkingDirectory 'package-lock.json'
+                $commandName = if (Test-Path -LiteralPath $lockFilePath -PathType Leaf) { 'ci' } else { 'install' }
+                $arguments = @($commandName, '--no-fund', '--no-audit')
                 if ([bool]$step.production) {
-                    $arguments += @("--omit", "dev")
+                    $arguments += @('--omit', 'dev')
                 }
 
                 Invoke-External -FilePath $npmPath -Arguments $arguments -WorkingDirectory $WorkingDirectory
                 $executedSteps.Add([pscustomobject]@{
-                    type       = "npm-install"
-                    production = [bool]$step.production
+                    type         = 'npm-install'
+                    command      = $commandName
+                    production   = [bool]$step.production
+                    usedLockfile = (Test-Path -LiteralPath $lockFilePath -PathType Leaf)
                 }) | Out-Null
             }
             default {
@@ -904,6 +932,7 @@ function Build-WorkflowPack {
 }
 
 try {
+    Normalize-WindowsCommandEnvironment
     Build-WorkflowPack
 } finally {
     if (-not $KeepIntermediate -and $script:BuildRoot -and (Test-Path -LiteralPath $script:BuildRoot)) {
