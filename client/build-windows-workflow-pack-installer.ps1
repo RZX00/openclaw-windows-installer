@@ -1079,7 +1079,7 @@ public static class Program
                 : LaunchOptions.ExternalReportPath;
             progressForm.ReportStatus(InstallRunningMessage + "...", 96, Path.GetFileName(openClawRoot));
 
-            ProcessStartInfo startInfo = new ProcessStartInfo("powershell.exe", BuildInstallerArgumentLine(installScriptPath, extractRoot, openClawRoot, reportPath, LaunchOptions.Action))
+            ProcessStartInfo startInfo = new ProcessStartInfo("powershell.exe", BuildInstallerArgumentLine(installScriptPath, extractRoot, openClawRoot, reportPath, LaunchOptions.Action, exePath))
             {
                 WorkingDirectory = extractRoot,
                 UseShellExecute = false,
@@ -1388,7 +1388,7 @@ public static class Program
         return validated;
     }
 
-    private static string BuildInstallerArgumentLine(string installScriptPath, string invokerRoot, string openClawRoot, string reportPath, string action)
+    private static string BuildInstallerArgumentLine(string installScriptPath, string invokerRoot, string openClawRoot, string reportPath, string action, string installerExecutablePath)
     {
         List<string> args = new List<string>();
         args.Add("-NoLogo");
@@ -1401,6 +1401,8 @@ public static class Program
         args.Add("__INSTALLER_LOCALE__");
         args.Add("-InvokerRoot");
         args.Add(invokerRoot);
+        args.Add("-InstallerExecutablePath");
+        args.Add(installerExecutablePath);
         args.Add("-PackId");
         args.Add("__PACK_ID__");
         args.Add("-Action");

@@ -3,6 +3,7 @@ param(
     [ValidateSet("zh-CN", "en-US")]
     [string]$Locale = "zh-CN",
     [string]$InvokerRoot,
+    [string]$InstallerExecutablePath,
     [string]$OpenClawRoot,
     [string]$ReportPath,
     [string]$PackId,
@@ -39,7 +40,9 @@ $script:Installer = [ordered]@{
     ReportsRoot = $null
     StoreReportsRoot = $null
     InstallStatePath = $null
+    InstallerExecutablePath = $InstallerExecutablePath
     SupportRoot = $null
+    SupportInstallerPath = $null
     SupportArchivePath = $null
     SupportManifestPath = $null
     SupportBuildMetadataPath = $null
@@ -1185,6 +1188,12 @@ function Initialize-Context {
     $script:Installer.BinDir = Join-Path $script:Installer.OpenClawRoot "bin"
     $script:Installer.OpenClawWrapperPath = Join-Path $script:Installer.BinDir "openclaw.cmd"
     $script:Installer.SupportRoot = Join-Path $script:Installer.OpenClawRoot ("support\workflow-packs\{0}" -f $script:Installer.PackId)
+    $supportInstallerFileName = if (-not [string]::IsNullOrWhiteSpace($script:Installer.InstallerExecutablePath)) {
+        [IO.Path]::GetFileName($script:Installer.InstallerExecutablePath)
+    } else {
+        "$(Get-ObjectPropertyValue -Object $script:Installer.Manifest -Name 'installerName')"
+    }
+    $script:Installer.SupportInstallerPath = $(if ([string]::IsNullOrWhiteSpace($supportInstallerFileName)) { $null } else { Join-Path $script:Installer.SupportRoot $supportInstallerFileName })
     $script:Installer.SupportArchivePath = Join-Path $script:Installer.SupportRoot ([IO.Path]::GetFileName($script:Installer.PackArchivePath))
     $script:Installer.SupportManifestPath = Join-Path $script:Installer.SupportRoot "pack-manifest.json"
     $script:Installer.SupportBuildMetadataPath = Join-Path $script:Installer.SupportRoot "workflow-pack-build-metadata.json"
@@ -1211,6 +1220,9 @@ function Initialize-Context {
 
 function Install-PackSupportAssets {
     Write-Info ("Installing support assets for workflow pack '{0}'..." -f $script:Installer.PackId)
+    if (-not [string]::IsNullOrWhiteSpace($script:Installer.InstallerExecutablePath) -and -not [string]::IsNullOrWhiteSpace($script:Installer.SupportInstallerPath)) {
+        Copy-FileToPath -Source $script:Installer.InstallerExecutablePath -Destination $script:Installer.SupportInstallerPath
+    }
     Copy-FileToPath -Source $script:Installer.PackArchivePath -Destination $script:Installer.SupportArchivePath
     Copy-FileToPath -Source $script:Installer.PackManifestPath -Destination $script:Installer.SupportManifestPath
     if (-not [string]::IsNullOrWhiteSpace($script:Installer.BuildMetadataPath)) {
@@ -1592,6 +1604,7 @@ function Save-WorkflowPackState {
         version                = $version
         pluginId               = $pluginId
         pluginIds              = @($pluginIds)
+        installerPath          = $script:Installer.SupportInstallerPath
         archivePath            = $script:Installer.SupportArchivePath
         manifestPath           = $script:Installer.SupportManifestPath
         buildMetadataPath      = $script:Installer.SupportBuildMetadataPath
