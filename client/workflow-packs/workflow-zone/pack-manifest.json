@@ -8,6 +8,37 @@
   "archiveName": "OpenClaw-Workflow-Pack-Workflow-Zone.zip",
   "installerName": "OpenClaw-Workflow-Pack-Workflow-Zone.exe",
   "description": "Curated workflow zone add-on package for Windows.",
+  "catalog": {
+    "publish": true,
+    "slug": "workflow-zone",
+    "publisher": "OpenClaw Official",
+    "itemType": "capability-pack",
+    "categories": [
+      "starter",
+      "workflow"
+    ],
+    "tags": [
+      "skills",
+      "agent-reach",
+      "starter"
+    ],
+    "summary": "Starter workflow capability pack for OpenClaw desktop.",
+    "description": "Installs the legacy starter workflow zone pack so desktop store and release pipelines can represent a simple capability-pack item end to end.",
+    "platforms": [
+      "windows"
+    ],
+    "architectures": [
+      "x64",
+      "arm64"
+    ],
+    "openClawVersionRange": ">=0.1.0",
+    "trustLevel": "official-curated",
+    "installStrategy": "workflow-pack-installer",
+    "supportsOfflineInstall": true,
+    "supportsRepair": true,
+    "supportsUninstall": true,
+    "requiresAdmin": true
+  },
   "skills": [
     "agent-reach"
   ],

@@ -1,0 +1,505 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openclaw.local/schemas/store-catalog.schema.json",
+  "title": "OpenClaw Store Catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "catalogVersion",
+    "generatedAt",
+    "publisher",
+    "channel",
+    "items",
+    "collections",
+    "metadata"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "catalogVersion": {
+      "type": "string",
+      "minLength": 1
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "publisher": {
+      "type": "string",
+      "minLength": 1
+    },
+    "channel": {
+      "type": "string",
+      "enum": ["official", "beta", "local"]
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/storeItem"
+      }
+    },
+    "collections": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/collection"
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generator", "sourceRepo", "schemaVersion"],
+      "properties": {
+        "generator": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceRepo": {
+          "type": "string",
+          "minLength": 1
+        },
+        "schemaVersion": {
+          "type": "integer",
+          "const": 1
+        }
+      }
+    }
+  },
+  "$defs": {
+    "nullableString": {
+      "type": ["string", "null"]
+    },
+    "artifactRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "fileName", "relativePath", "sha256", "sizeBytes", "required"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["installer", "archive", "build-metadata", "source-lock", "catalog-item"]
+        },
+        "fileName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "relativePath": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "required": {
+          "type": "boolean"
+        }
+      }
+    },
+    "prerequisiteCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "severity", "message", "manual"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "warning", "error"]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "manual": {
+          "type": "boolean"
+        },
+        "command": {
+          "$ref": "#/$defs/nullableString"
+        }
+      }
+    },
+    "verificationCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "summary"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "readinessRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "when"],
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": ["Ready", "Needs Setup", "Needs Repair"]
+        },
+        "when": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "collection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "summary", "itemIds"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "itemIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "storeItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "id",
+        "slug",
+        "version",
+        "title",
+        "summary",
+        "publisher",
+        "itemType",
+        "categories",
+        "tags",
+        "screenshots",
+        "source",
+        "trust",
+        "compatibility",
+        "contents",
+        "install",
+        "prerequisites",
+        "verification",
+        "support"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "type": "integer",
+          "const": 1
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "slug": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "publisher": {
+          "type": "string",
+          "minLength": 1
+        },
+        "itemType": {
+          "type": "string",
+          "enum": ["native-plugin", "bundle-plugin", "capability-pack"]
+        },
+        "categories": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "screenshots": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["manifestPath", "buildMetadataFile", "sourceLockFile", "itemMetadataFile", "releaseArtifacts"],
+          "properties": {
+            "manifestPath": {
+              "type": "string",
+              "minLength": 1
+            },
+            "buildMetadataFile": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sourceLockFile": {
+              "type": "string",
+              "minLength": 1
+            },
+            "itemMetadataFile": {
+              "type": "string",
+              "minLength": 1
+            },
+            "releaseArtifacts": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/artifactRef"
+              },
+              "minItems": 4
+            }
+          }
+        },
+        "trust": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["channel", "trustLevel", "auditStatus", "auditSummary", "sourcePinned", "releaseBlocked"],
+          "properties": {
+            "channel": {
+              "type": "string",
+              "enum": ["official", "beta", "local"]
+            },
+            "trustLevel": {
+              "type": "string",
+              "minLength": 1
+            },
+            "auditStatus": {
+              "type": "string",
+              "enum": ["passed", "warning", "blocked"]
+            },
+            "auditSummary": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sourcePinned": {
+              "type": "boolean"
+            },
+            "releaseBlocked": {
+              "type": "boolean"
+            }
+          }
+        },
+        "compatibility": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["platforms", "architectures", "openClawVersionRange", "requiresAdmin", "supportsOfflineInstall"],
+          "properties": {
+            "platforms": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "minItems": 1
+            },
+            "architectures": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "minItems": 1
+            },
+            "openClawVersionRange": {
+              "type": "string",
+              "minLength": 1
+            },
+            "requiresAdmin": {
+              "type": "boolean"
+            },
+            "supportsOfflineInstall": {
+              "type": "boolean"
+            }
+          }
+        },
+        "contents": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["pluginIds", "skillIds", "runtimeProfiles", "includedItems"],
+          "properties": {
+            "pluginIds": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "minItems": 1
+            },
+            "skillIds": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "runtimeProfiles": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "includedItems": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "install": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["strategy", "primaryArtifact", "artifactRefs", "supportsOfflineInstall", "supportsRepair", "supportsUninstall"],
+          "properties": {
+            "strategy": {
+              "type": "string",
+              "minLength": 1
+            },
+            "primaryArtifact": {
+              "$ref": "#/$defs/artifactRef"
+            },
+            "artifactRefs": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/artifactRef"
+              },
+              "minItems": 4
+            },
+            "supportsOfflineInstall": {
+              "type": "boolean"
+            },
+            "supportsRepair": {
+              "type": "boolean"
+            },
+            "supportsUninstall": {
+              "type": "boolean"
+            }
+          }
+        },
+        "prerequisites": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["checks"],
+          "properties": {
+            "checks": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/prerequisiteCheck"
+              }
+            }
+          }
+        },
+        "verification": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["checks", "readinessRules", "expectedReadinessStates"],
+          "properties": {
+            "checks": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/verificationCheck"
+              }
+            },
+            "readinessRules": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/readinessRule"
+              },
+              "minItems": 3
+            },
+            "expectedReadinessStates": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": ["Ready", "Needs Setup", "Needs Repair"]
+              },
+              "minItems": 3,
+              "maxItems": 3
+            }
+          }
+        },
+        "support": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["docsUrl", "supportUrl", "knownIssues", "repairHints"],
+          "properties": {
+            "docsUrl": {
+              "$ref": "#/$defs/nullableString"
+            },
+            "supportUrl": {
+              "$ref": "#/$defs/nullableString"
+            },
+            "knownIssues": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "repairHints": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

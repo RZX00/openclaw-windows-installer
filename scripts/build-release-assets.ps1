@@ -7,7 +7,10 @@ param(
     [string]$Locale = "zh-CN",
     [ValidateSet("x64", "arm64")]
     [string]$Architecture = "x64",
-    [string]$ReleaseTag
+    [string]$ReleaseTag,
+    [string[]]$PackIds,
+    [switch]$AllowUnresolvedSkillSources,
+    [switch]$AllowReleaseBlockedCatalogItems
 )
 
 Set-StrictMode -Version Latest
@@ -141,17 +144,49 @@ function Build-ReleaseLaunchers {
     return $outputs
 }
 
+function Get-WorkflowPackIdsForRelease {
+    if (@($PackIds).Count -gt 0) {
+        return @($PackIds)
+    }
+
+    return @('workflow-zone')
+}
+
+function Get-WorkflowPackDefinitions {
+    param([string[]]$SelectedPackIds)
+
+    $definitions = New-Object System.Collections.Generic.List[object]
+    foreach ($packId in @($SelectedPackIds)) {
+        $manifestPath = Join-Path $repoRoot ("client\workflow-packs\{0}\pack-manifest.json" -f $packId)
+        $manifest = Read-JsonFile -Path $manifestPath
+        $definitions.Add([pscustomobject]@{
+            PackId       = $packId
+            ManifestPath = $manifestPath
+            Manifest     = $manifest
+        }) | Out-Null
+    }
+
+    return @($definitions.ToArray())
+}
+
 $repoRoot = Split-Path -Path $PSScriptRoot -Parent
 $buildScript = Join-Path $repoRoot "client\build-windows-oneclick-installer.ps1"
 $workflowPackBuilderScript = Join-Path $repoRoot "client\build-windows-workflow-pack-installer.ps1"
-$workflowPackId = "workflow-zone"
-$workflowPackManifestPath = Join-Path $repoRoot ("client\workflow-packs\{0}\pack-manifest.json" -f $workflowPackId)
-$workflowPackManifest = Read-JsonFile -Path $workflowPackManifestPath
+$catalogBuilderScript = Join-Path $repoRoot "client\build-openclaw-store-catalog.ps1"
 if (-not (Test-Path -LiteralPath $buildScript)) {
     throw "Build script was not found: $buildScript"
 }
 if (-not (Test-Path -LiteralPath $workflowPackBuilderScript)) {
     throw "Workflow pack build script was not found: $workflowPackBuilderScript"
+}
+if (-not (Test-Path -LiteralPath $catalogBuilderScript)) {
+    throw "Catalog build script was not found: $catalogBuilderScript"
+}
+
+$selectedPackIds = @(Get-WorkflowPackIdsForRelease)
+$workflowPackDefinitions = @(Get-WorkflowPackDefinitions -SelectedPackIds $selectedPackIds)
+if ($workflowPackDefinitions.Count -eq 0) {
+    throw 'No workflow packs were selected for release.'
 }
 
 if ([string]::IsNullOrWhiteSpace($OutputDir)) {
@@ -163,10 +198,8 @@ Ensure-Directory -Path $OutputDir
 $baseName = "OpenClaw-Setup-Windows-$Architecture"
 $baseFileName = "$baseName.exe"
 $baseFilePath = Join-Path $OutputDir $baseFileName
-$workflowPackInstallerName = "$($workflowPackManifest.installerName)"
-$workflowPackArchiveName = "$($workflowPackManifest.archiveName)"
-$workflowPackInstallerPath = Join-Path $OutputDir $workflowPackInstallerName
-$workflowPackArchivePath = Join-Path $OutputDir $workflowPackArchiveName
+$catalogFilePath = Join-Path $OutputDir 'openclaw-store-catalog.json'
+$storeItemsDir = Join-Path $OutputDir 'store-items'
 
 Get-ChildItem -LiteralPath $OutputDir -File -ErrorAction SilentlyContinue |
     Where-Object {
@@ -177,10 +210,17 @@ Get-ChildItem -LiteralPath $OutputDir -File -ErrorAction SilentlyContinue |
         $_.Name -like "OpenClaw-Start*.exe" -or
         $_.Name -like "OpenClaw-Update*.exe" -or
         $_.Name -like "OpenClaw-Repair*.exe" -or
+        $_.Name -like "workflow-pack-build-metadata-*.json" -or
+        $_.Name -like "workflow-pack-source-lock-*.json" -or
+        $_.Name -eq 'openclaw-store-catalog.json' -or
         $_.Name -like "$baseName*.sha256" -or
-        $_.Name -eq "release-manifest.json"
+        $_.Name -eq 'release-manifest.json'
     } |
     Remove-Item -Force -ErrorAction SilentlyContinue
+
+if (Test-Path -LiteralPath $storeItemsDir) {
+    Remove-Item -LiteralPath $storeItemsDir -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 & $buildScript `
     -Channel $Channel `
@@ -193,25 +233,60 @@ if (-not (Test-Path -LiteralPath $baseFilePath)) {
     throw "Release asset was not produced: $baseFilePath"
 }
 
-& $workflowPackBuilderScript `
-    -Locale $Locale `
-    -Architecture $Architecture `
-    -PackId $workflowPackId `
-    -OutputDir $OutputDir `
-    -OutputName $workflowPackInstallerName
+$workflowPackOutputs = New-Object System.Collections.Generic.List[object]
+foreach ($definition in $workflowPackDefinitions) {
+    $installerPath = Join-Path $OutputDir "$($definition.Manifest.installerName)"
+    $archivePath = Join-Path $OutputDir "$($definition.Manifest.archiveName)"
 
-if (-not (Test-Path -LiteralPath $workflowPackInstallerPath)) {
-    throw "Workflow pack release asset was not produced: $workflowPackInstallerPath"
-}
-if (-not (Test-Path -LiteralPath $workflowPackArchivePath)) {
-    throw "Workflow pack archive asset was not produced: $workflowPackArchivePath"
+    & $workflowPackBuilderScript `
+        -Locale $Locale `
+        -Architecture $Architecture `
+        -PackId $definition.PackId `
+        -OutputDir $OutputDir `
+        -OutputName "$($definition.Manifest.installerName)" `
+        -AllowUnresolvedSkillSources:$AllowUnresolvedSkillSources
+
+    if (-not (Test-Path -LiteralPath $installerPath)) {
+        throw "Workflow pack release asset was not produced: $installerPath"
+    }
+    if (-not (Test-Path -LiteralPath $archivePath)) {
+        throw "Workflow pack archive asset was not produced: $archivePath"
+    }
+
+    $workflowPackOutputs.Add([pscustomobject]@{
+        PackId         = $definition.PackId
+        InstallerPath  = $installerPath
+        ArchivePath    = $archivePath
+        Manifest       = $definition.Manifest
+    }) | Out-Null
 }
 
 $launcherPaths = Build-ReleaseLaunchers -OutputDir $OutputDir -Locale $Locale
 
+$storeChannel = if ($Channel -eq 'beta') { 'beta' } else { 'official' }
+& $catalogBuilderScript `
+    -ReleaseDir $OutputDir `
+    -OutputCatalogPath $catalogFilePath `
+    -OutputItemsDir $storeItemsDir `
+    -PackIds $selectedPackIds `
+    -CatalogVersion $(if ([string]::IsNullOrWhiteSpace($ReleaseTag)) { '0.1.0' } else { $ReleaseTag.TrimStart('v') }) `
+    -Channel $storeChannel `
+    -AllowReleaseBlockedItems:$AllowReleaseBlockedCatalogItems
+
+if (-not (Test-Path -LiteralPath $catalogFilePath)) {
+    throw "Store catalog asset was not produced: $catalogFilePath"
+}
+if (-not (Test-Path -LiteralPath $storeItemsDir -PathType Container)) {
+    throw "Store item metadata directory was not produced: $storeItemsDir"
+}
+
 Write-Host ("[OK] Release asset: {0}" -f $baseFilePath)
-Write-Host ("[OK] Workflow pack installer: {0}" -f $workflowPackInstallerPath)
-Write-Host ("[OK] Workflow pack archive: {0}" -f $workflowPackArchivePath)
+foreach ($output in @($workflowPackOutputs.ToArray())) {
+    Write-Host ("[OK] Workflow pack installer: {0}" -f $output.InstallerPath)
+    Write-Host ("[OK] Workflow pack archive: {0}" -f $output.ArchivePath)
+}
 foreach ($launcherPath in $launcherPaths) {
     Write-Host ("[OK] Launcher asset: {0}" -f $launcherPath)
 }
+Write-Host ("[OK] Store catalog: {0}" -f $catalogFilePath)
+Write-Host ("[OK] Store item metadata directory: {0}" -f $storeItemsDir)

@@ -1,0 +1,48 @@
+{
+  "description": "OpenClaw official foundation capability pack that bundles the shared runtime, curated baseline skills, readiness checks, and repair metadata for desktop installation.",
+  "screenshots": [],
+  "verification": {
+    "checks": [
+      {
+        "id": "plugin-installed",
+        "name": "Plugin installed",
+        "summary": "OpenClaw must detect and enable the foundation-common plugin payload."
+      },
+      {
+        "id": "skills-present",
+        "name": "Declared skills present",
+        "summary": "All declared foundation-common skills must exist in the installed skills directory."
+      },
+      {
+        "id": "runtime-healthy",
+        "name": "Bundled runtime healthy",
+        "summary": "Bundled runtime commands such as agent-reach, skills, and agent-browser must be runnable."
+      }
+    ],
+    "readinessRules": [
+      {
+        "state": "Ready",
+        "when": "All verification checks pass and no blocking manual prerequisites remain."
+      },
+      {
+        "state": "Needs Setup",
+        "when": "Install succeeds but manual prerequisites remain, such as browser/operator enablement."
+      },
+      {
+        "state": "Needs Repair",
+        "when": "Expected runtime, payload, provisioning, or verification state drifts."
+      }
+    ]
+  },
+  "support": {
+    "docsUrl": null,
+    "supportUrl": null,
+    "knownIssues": [
+      "Official release remains blocked until proactive-agent and memory-setup are pinned to authoritative upstream sources."
+    ],
+    "repairHints": [
+      "Rerun the workflow pack repair flow if runtime files or skill payload drift.",
+      "If readiness stays in Needs Setup, complete the remaining manual browser/operator steps and rerun verification."
+    ]
+  }
+}

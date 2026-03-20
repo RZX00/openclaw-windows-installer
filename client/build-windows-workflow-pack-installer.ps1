@@ -85,6 +85,85 @@ function Read-JsonFile {
     return (Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json)
 }
 
+function Get-StoreCatalogConfig {
+    param([object]$Manifest)
+
+    return (Get-ObjectPropertyValue -Object $Manifest -Name "catalog")
+}
+
+function Assert-StoreCatalogMetadata {
+    param([object]$Manifest)
+
+    $catalog = Get-StoreCatalogConfig -Manifest $Manifest
+    if ($null -eq $catalog) {
+        return
+    }
+
+    $requiredStringProperties = @(
+        "slug",
+        "publisher",
+        "itemType",
+        "summary",
+        "trustLevel",
+        "installStrategy",
+        "openClawVersionRange"
+    )
+    foreach ($propertyName in $requiredStringProperties) {
+        if ([string]::IsNullOrWhiteSpace("$(Get-ObjectPropertyValue -Object $catalog -Name $propertyName)")) {
+            Write-Err (("Workflow pack manifest catalog metadata must define {0}." -f $propertyName))
+        }
+    }
+
+    $requiredArrayProperties = @("categories", "tags", "platforms", "architectures")
+    foreach ($propertyName in $requiredArrayProperties) {
+        if (@(Convert-ToArray -Value (Get-ObjectPropertyValue -Object $catalog -Name $propertyName)).Count -eq 0) {
+            Write-Err (("Workflow pack manifest catalog metadata must define a non-empty {0} array." -f $propertyName))
+        }
+    }
+
+    $requiredBooleanProperties = @(
+        "publish",
+        "supportsOfflineInstall",
+        "supportsRepair",
+        "supportsUninstall",
+        "requiresAdmin"
+    )
+    foreach ($propertyName in $requiredBooleanProperties) {
+        if ($null -eq $catalog.PSObject.Properties[$propertyName]) {
+            Write-Err (("Workflow pack manifest catalog metadata must define boolean field {0}." -f $propertyName))
+        }
+    }
+}
+
+function Get-StoreCatalogSummary {
+    param([object]$Manifest)
+
+    $catalog = Get-StoreCatalogConfig -Manifest $Manifest
+    if ($null -eq $catalog) {
+        return $null
+    }
+
+    return [pscustomobject]@{
+        publish                = [bool](Get-ObjectPropertyValue -Object $catalog -Name "publish" -Default $false)
+        slug                   = "$(Get-ObjectPropertyValue -Object $catalog -Name 'slug')"
+        publisher              = "$(Get-ObjectPropertyValue -Object $catalog -Name 'publisher')"
+        itemType               = "$(Get-ObjectPropertyValue -Object $catalog -Name 'itemType')"
+        categories             = @(Convert-ToArray -Value (Get-ObjectPropertyValue -Object $catalog -Name "categories"))
+        tags                   = @(Convert-ToArray -Value (Get-ObjectPropertyValue -Object $catalog -Name "tags"))
+        summary                = "$(Get-ObjectPropertyValue -Object $catalog -Name 'summary')"
+        description            = $(if ([string]::IsNullOrWhiteSpace("$(Get-ObjectPropertyValue -Object $catalog -Name 'description')")) { $null } else { "$(Get-ObjectPropertyValue -Object $catalog -Name 'description')" })
+        platforms              = @(Convert-ToArray -Value (Get-ObjectPropertyValue -Object $catalog -Name "platforms"))
+        architectures          = @(Convert-ToArray -Value (Get-ObjectPropertyValue -Object $catalog -Name "architectures"))
+        openClawVersionRange   = "$(Get-ObjectPropertyValue -Object $catalog -Name 'openClawVersionRange')"
+        trustLevel             = "$(Get-ObjectPropertyValue -Object $catalog -Name 'trustLevel')"
+        installStrategy        = "$(Get-ObjectPropertyValue -Object $catalog -Name 'installStrategy')"
+        supportsOfflineInstall = [bool](Get-ObjectPropertyValue -Object $catalog -Name "supportsOfflineInstall" -Default $false)
+        supportsRepair         = [bool](Get-ObjectPropertyValue -Object $catalog -Name "supportsRepair" -Default $false)
+        supportsUninstall      = [bool](Get-ObjectPropertyValue -Object $catalog -Name "supportsUninstall" -Default $false)
+        requiresAdmin          = [bool](Get-ObjectPropertyValue -Object $catalog -Name "requiresAdmin" -Default $false)
+    }
+}
+
 function Convert-ToArray {
     param([object]$Value)
 
@@ -872,6 +951,8 @@ function Resolve-WorkflowPackContract {
     if ([string]::IsNullOrWhiteSpace("$($manifest.installerName)")) {
         Write-Err "Workflow pack manifest must define installerName."
     }
+
+    Assert-StoreCatalogMetadata -Manifest $manifest
 
     return [pscustomobject]@{
         RootPath     = Get-WorkflowPackRoot
@@ -2370,6 +2451,7 @@ function Build-WorkflowPackInstaller {
         installerName = $effectiveOutputName
         runtimeKey = $(if ($runtimeSpec) { "$($runtimeSpec.key)" } else { $null })
         runtimeLayout = $(if ($runtimeSpec) { "$($runtimeSpec.layout)" } else { $null })
+        catalog = $(Get-StoreCatalogSummary -Manifest $workflowPack.Manifest)
     }
 
     if ($requiresWorkflowRuntime) {

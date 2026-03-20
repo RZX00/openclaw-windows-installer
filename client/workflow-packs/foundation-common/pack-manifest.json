@@ -8,6 +8,40 @@
   "archiveName": "OpenClaw-Workflow-Pack-Foundation-Common.zip",
   "installerName": "OpenClaw-Workflow-Pack-Foundation-Common.exe",
   "description": "Shared foundation capability add-on package for Windows.",
+  "catalog": {
+    "publish": true,
+    "slug": "foundation-common",
+    "publisher": "OpenClaw Official",
+    "itemType": "capability-pack",
+    "categories": [
+      "foundation",
+      "automation",
+      "security"
+    ],
+    "tags": [
+      "skills",
+      "runtime",
+      "agent-reach",
+      "browser",
+      "repair"
+    ],
+    "summary": "Shared foundation capability pack for OpenClaw desktop.",
+    "description": "Installs the shared OpenClaw foundation capability set with bundled runtime, curated skills, readiness checks, and repair metadata.",
+    "platforms": [
+      "windows"
+    ],
+    "architectures": [
+      "x64",
+      "arm64"
+    ],
+    "openClawVersionRange": ">=0.1.0",
+    "trustLevel": "official-curated",
+    "installStrategy": "workflow-pack-installer",
+    "supportsOfflineInstall": true,
+    "supportsRepair": true,
+    "supportsUninstall": true,
+    "requiresAdmin": true
+  },
   "skills": [
     "agent-reach",
     "clawdefender",
