@@ -54,6 +54,19 @@ Not this repo
   -> OpenClaw community marketplace backend
 ```
 
+Current paired-repo ownership:
+
+```text
+E:\app\openclaw-setup-cn
+  -> artifact factory
+  -> installer / repair / verification backend
+
+E:\app\aip
+  -> desktop shell
+  -> control-plane-backed product surfaces
+  -> future in-app OpenClaw store UI
+```
+
 That matters because the future desktop store should reuse artifacts produced here,
 but the final in-app store UI likely belongs in the OpenClaw desktop product layer,
 not inside this packaging repo.
@@ -402,7 +415,7 @@ stateDiagram-v2
 ### User-visible states
 
 ```text
-Not installed
+Not Installed
 Queued
 Resolving
 Downloading
@@ -410,11 +423,11 @@ Installing
 Provisioning
 Verifying
 Ready
-Needs setup
-Needs repair
+Needs Setup
+Needs Repair
 Blocked
 Failed
-Update available
+Update Available
 Updating
 Uninstalling
 ```
@@ -423,17 +436,23 @@ Uninstalling
 
 ```text
 Ready
-  -> installed and verification passed
+  -> verification passed and no blocking manual steps remain
 
-Needs setup
+Needs Setup
   -> installed successfully, but one or more manual prerequisites remain
 
-Needs repair
-  -> expected files or runtime are missing, drifted, or unhealthy
+Needs Repair
+  -> expected payload, runtime, provisioning, or verification drift detected
 
 Blocked
   -> install cannot proceed because compatibility, source trust, or policy failed
 ```
+
+Canonical contract references:
+
+- [openclaw-store-item-contract.md](/E:/app/openclaw-setup-cn/docs/contracts/openclaw-store-item-contract.md)
+- [openclaw-store-install-state-machine.md](/E:/app/openclaw-setup-cn/docs/contracts/openclaw-store-install-state-machine.md)
+- [openclaw-store-catalog-contract.md](/E:/app/openclaw-setup-cn/docs/contracts/openclaw-store-catalog-contract.md)
 
 ## Install Transaction Model
 
