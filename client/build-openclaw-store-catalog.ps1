@@ -162,6 +162,69 @@ function Get-PackManifestDefinitions {
     return @($definitions.ToArray())
 }
 
+function Get-CollectionDefinitions {
+    param([string]$RepoRoot)
+
+    $collectionsRoot = Join-Path $RepoRoot 'client/catalog/collections'
+    if (-not (Test-Path -LiteralPath $collectionsRoot -PathType Container)) {
+        return @()
+    }
+
+    $definitions = New-Object System.Collections.Generic.List[object]
+    foreach ($collectionPath in @(Get-ChildItem -LiteralPath $collectionsRoot -Filter '*.json' -File | Sort-Object Name)) {
+        $definitions.Add([pscustomobject]@{
+            Path       = $collectionPath.FullName
+            Collection = (Read-JsonFile -Path $collectionPath.FullName)
+        }) | Out-Null
+    }
+
+    return @($definitions.ToArray())
+}
+
+function Build-CollectionObjects {
+    param(
+        [string]$RepoRoot,
+        [object[]]$Items
+    )
+
+    $availableItemIds = @($Items | ForEach-Object { "$(Get-ObjectPropertyValue -Object $_ -Name 'id')" })
+    $collections = New-Object System.Collections.Generic.List[object]
+    foreach ($definition in @(Get-CollectionDefinitions -RepoRoot $RepoRoot)) {
+        $collection = $definition.Collection
+        Assert-NonEmptyString -Value "$(Get-ObjectPropertyValue -Object $collection -Name 'id')" -FieldName ("collection.{0}.id" -f $definition.Path)
+        Assert-NonEmptyString -Value "$(Get-ObjectPropertyValue -Object $collection -Name 'title')" -FieldName ("collection.{0}.title" -f $definition.Path)
+        Assert-NonEmptyString -Value "$(Get-ObjectPropertyValue -Object $collection -Name 'summary')" -FieldName ("collection.{0}.summary" -f $definition.Path)
+
+        $filteredItemIds = New-Object System.Collections.Generic.List[string]
+        foreach ($itemId in @(Convert-ToArray -Value (Get-ObjectPropertyValue -Object $collection -Name 'itemIds'))) {
+            $itemIdText = "$itemId"
+            if ([string]::IsNullOrWhiteSpace($itemIdText)) {
+                continue
+            }
+            if ($itemIdText -notin $availableItemIds) {
+                continue
+            }
+            if (@($filteredItemIds | Where-Object { $_ -eq $itemIdText }).Count -eq 0) {
+                $filteredItemIds.Add($itemIdText) | Out-Null
+            }
+        }
+
+        if ($filteredItemIds.Count -eq 0) {
+            Write-Warn ("Skipping collection '{0}' because none of its itemIds are present in this catalog build." -f $collection.id)
+            continue
+        }
+
+        $collections.Add([pscustomobject]@{
+            id      = "$($collection.id)"
+            title   = "$($collection.title)"
+            summary = "$($collection.summary)"
+            itemIds = @($filteredItemIds.ToArray())
+        }) | Out-Null
+    }
+
+    return @($collections.ToArray())
+}
+
 function Assert-StoreReadyManifest {
     param([object]$Definition)
 
@@ -560,6 +623,25 @@ function Validate-StoreItem {
     }
 }
 
+function Validate-CollectionObject {
+    param(
+        [object]$Collection,
+        [string[]]$AvailableItemIds
+    )
+
+    foreach ($fieldName in @('id', 'title', 'summary')) {
+        Assert-NonEmptyString -Value "$(Get-ObjectPropertyValue -Object $Collection -Name $fieldName)" -FieldName ("collection.{0}" -f $fieldName)
+    }
+
+    $itemIds = @(Convert-ToArray -Value (Get-ObjectPropertyValue -Object $Collection -Name 'itemIds'))
+    Assert-ArrayHasValues -Values $itemIds -FieldName ("collection.{0}.itemIds" -f $Collection.id)
+    foreach ($itemId in @($itemIds)) {
+        if ("$itemId" -notin @($AvailableItemIds)) {
+            Write-Err ("Collection '{0}' references unknown item id '{1}'." -f $Collection.id, $itemId)
+        }
+    }
+}
+
 function Validate-CatalogObject {
     param([object]$Catalog)
 
@@ -567,8 +649,14 @@ function Validate-CatalogObject {
         Assert-NonEmptyString -Value "$(Get-ObjectPropertyValue -Object $Catalog -Name $fieldName)" -FieldName ("catalog.{0}" -f $fieldName)
     }
 
+    $availableItemIds = @()
     foreach ($item in @(Convert-ToArray -Value $Catalog.items)) {
         Validate-StoreItem -Item $item
+        $availableItemIds += "$($item.id)"
+    }
+
+    foreach ($collection in @(Convert-ToArray -Value $Catalog.collections)) {
+        Validate-CollectionObject -Collection $collection -AvailableItemIds @($availableItemIds)
     }
 }
 
@@ -618,6 +706,8 @@ foreach ($definition in $selectedDefinitions) {
     $items.Add($item) | Out-Null
 }
 
+$collections = @(Build-CollectionObjects -RepoRoot $repoRoot -Items @($items.ToArray()))
+
 $catalog = [ordered]@{
     '$schema'      = './client/catalog/catalog.schema.json'
     schemaVersion  = 1
@@ -626,7 +716,7 @@ $catalog = [ordered]@{
     publisher      = $Publisher
     channel        = $Channel
     items          = @($items.ToArray())
-    collections    = @()
+    collections    = @($collections)
     metadata       = [pscustomobject]@{
         generator     = 'client/build-openclaw-store-catalog.ps1'
         sourceRepo    = 'openclaw-setup-cn'
@@ -638,4 +728,4 @@ Validate-CatalogObject -Catalog ([pscustomobject]$catalog)
 Save-JsonFile -Path $OutputCatalogPath -Object ([pscustomobject]$catalog)
 
 Write-Ok ("OpenClaw store catalog written: {0}" -f $OutputCatalogPath)
-Write-Ok ("Catalog contains {0} item(s)." -f @($items.ToArray()).Count)
+Write-Ok ("Catalog contains {0} item(s) and {1} collection(s)." -f @($items.ToArray()).Count, @($collections).Count)

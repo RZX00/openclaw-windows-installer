@@ -34,21 +34,40 @@ Remote access guidance:
 
 `OpenClaw-Update.exe` and `OpenClaw-Repair.exe` reuse the same post-validation path for capability cache refresh, token checks, RPC health verification, dashboard verification, and provider-auth classification.
 
-## Workflow Add-On Packages
+## Store Catalog And Capability Packs
 
-`OpenClaw-Workflow-Pack-Workflow-Zone.exe` is the first **workflow add-on package** for an existing Windows OpenClaw install.
+This repo now emits the first **official OpenClaw desktop store demo assets**.
 
-- install `OpenClaw-Setup-Windows-x64.exe` first
-- then run `OpenClaw-Workflow-Pack-Workflow-Zone.exe`
-- the workflow add-on now uses native `openclaw plugins install <local-archive>` semantics instead of the old Reach-only `copy SKILL.md + wrapper` path
-- Update and Repair will re-verify previously installed workflow add-ons and self-heal them from the local support archive when possible
-- the release also ships `OpenClaw-Workflow-Pack-Workflow-Zone.zip` as a support/debug artifact for native reinstall and troubleshooting
+Store-facing release artifacts:
+
+- `release/openclaw-store-catalog.json`
+- `release/store-items/*.json`
+- `release/OpenClaw-Workflow-Pack-Foundation-Common.exe`
+- `release/OpenClaw-Workflow-Pack-Foundation-Common.zip`
+- matching workflow-pack build metadata and source-lock JSON files
+
+Capability-pack notes:
+
+- `foundation-common` is the primary official starter capability-pack for the desktop store demo
+- `workflow-zone` remains a legacy-compatible workflow pack and can still be built explicitly when needed
+- install and repair now persist item-scoped reports under `%ProgramData%\OpenClaw\reports\store\<item-id>\`
+- Update and Repair re-verify installed capability-packs against the same readiness contract used by first install
 
 Recommended download order:
 
 1. `OpenClaw-Setup-Windows-x64.exe`
-2. `OpenClaw-Workflow-Pack-Workflow-Zone.exe` when the customer bought the curated workflow package
+2. `OpenClaw-Workflow-Pack-Foundation-Common.exe` when the machine also needs the official foundation capability layer
 3. `OpenClaw-Start.exe`, `OpenClaw-Update.exe`, and `OpenClaw-Repair.exe` for the already-installed environment
+4. `openclaw-store-catalog.json` and `store-items/*.json` when wiring the desktop store demo shell
+
+```mermaid
+flowchart LR
+    A["pack-manifest.json"] --> B["workflow pack installer + archive"]
+    A --> C["store item metadata"]
+    D["collection metadata"] --> E["openclaw-store-catalog.json"]
+    B --> E
+    C --> E
+```
 
 ## 项目定位
 
@@ -69,9 +88,12 @@ Recommended download order:
 | 文件 | 适用场景 | 说明 |
 | --- | --- | --- |
 | `OpenClaw-Setup-Windows-x64.exe` | 第一次安装 | 标准 Windows 安装器，首次使用优先下载这个 |
+| `OpenClaw-Workflow-Pack-Foundation-Common.exe` | 安装基础能力包 | 官方 starter capability-pack 安装器 |
 | `OpenClaw-Start.exe` | 已安装后直接启动 | 拉起维护窗口，校验环境并打开 Dashboard |
 | `OpenClaw-Update.exe` | 已安装后更新 | 对当前本机安装执行更新 |
 | `OpenClaw-Repair.exe` | 已安装后修复 | 对异常或损坏环境执行修复 |
+| `openclaw-store-catalog.json` | 桌面商店 demo | 官方 catalog 索引，供桌面 Store Home / Search / Detail 页面消费 |
+| `store-items/*.json` | 桌面商店 demo | 与 installer / archive 一一对应的 item 元数据，供 Store Detail / Install 状态消费 |
 
 ## 一图看懂工作流
 
@@ -132,6 +154,7 @@ flowchart LR
 | --- | --- |
 | `client/` | Windows 包装层源码、图标、构建脚本、维护脚本 |
 | `client/package/` | 用于兼容构建的 OpenClaw 上游快照 |
+| `client/catalog/` | Store catalog/item/collection 元数据输入 |
 | `assets/readme/` | README 展示资源（SVG 等） |
 | `scripts/build-release-assets.ps1` | Release 构建脚本 |
 | `.github/workflows/windows-release.yml` | GitHub Release 自动发布工作流 |
@@ -160,8 +183,18 @@ client\dist\windows-oneclick\
 
 ### 构建 Release 资产
 
+正式发布构建命令：
+
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\build-release-assets.ps1 -ReleaseTag v0.1.2
+powershell -ExecutionPolicy Bypass -File .\scripts\build-release-assets.ps1 -ReleaseTag v0.1.3
+```
+
+默认会选择 `foundation-common` 作为官方 starter capability-pack。
+当前由于 `proactive-agent` 和 `memory-setup` 仍未锁定权威源，正式发布构建会继续被 source gate 阻塞。
+在本地验证桌面商店 demo 产物时，请显式使用开发态放行参数：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build-release-assets.ps1 -ReleaseTag v0.1.3 -AllowUnresolvedSkillSources -AllowReleaseBlockedCatalogItems
 ```
 
 默认输出：
@@ -171,26 +204,31 @@ release\
 ├─ OpenClaw-Setup-Windows-x64.exe
 ├─ OpenClaw-Start.exe
 ├─ OpenClaw-Update.exe
-└─ OpenClaw-Repair.exe
+├─ OpenClaw-Repair.exe
+├─ OpenClaw-Workflow-Pack-Foundation-Common.exe
+├─ OpenClaw-Workflow-Pack-Foundation-Common.zip
+├─ workflow-pack-build-metadata-foundation-common.json
+├─ workflow-pack-source-lock-foundation-common.json
+├─ openclaw-store-catalog.json
+└─ store-items\
+   └─ foundation-common.json
 ```
+
+如果要显式构建兼容型旧包，例如 `workflow-zone`，请额外传入 `-PackIds workflow-zone`。
 
 ## 发布方式
 
-推送 `v*` 标签后，GitHub Actions 会自动：
-
-- 构建安装器
-- 构建一键启动 / 更新 / 修复包
-- 创建或更新对应的 GitHub Release
-- 上传 4 个可直接下载的 EXE
+推送 `v*` 标签后会触发 [`.github/workflows/windows-release.yml`](./.github/workflows/windows-release.yml)。
+当前应把它视为 release build 入口，而不是已经开放的官方 store 发布通道，因为 `foundation-common` 仍受 `proactive-agent` 和 `memory-setup` 的 source gate 阻塞。
 
 示例：
 
 ```powershell
 git checkout main
 git pull --ff-only
-git tag v0.1.2
+git tag v0.1.3
 git push origin main
-git push origin v0.1.2
+git push origin v0.1.3
 ```
 
 ## 与上游 OpenClaw 的关系

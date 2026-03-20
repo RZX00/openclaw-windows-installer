@@ -149,7 +149,7 @@ function Get-WorkflowPackIdsForRelease {
         return @($PackIds)
     }
 
-    return @('workflow-zone')
+    return @('foundation-common')
 }
 
 function Get-WorkflowPackDefinitions {

@@ -1,0 +1,8 @@
+{
+  "id": "official-demo",
+  "title": "Official Starter Collection",
+  "summary": "Official OpenClaw desktop store starter capability packs for the first curated demo catalog.",
+  "itemIds": [
+    "foundation-common"
+  ]
+}
