@@ -52,6 +52,114 @@ function Write-Ok($m) { Write-Host "[OK] $m" -ForegroundColor Green }
 function Write-Warn($m) { Write-Host "[WARN] $m" -ForegroundColor Yellow }
 function Write-Err($m) { Write-Host "[ERROR] $m" -ForegroundColor Red; throw $m }
 
+function Get-NormalizedWindowsPathExt {
+    $defaultEntries = @(".COM", ".EXE", ".BAT", ".CMD", ".VBS", ".JS", ".WS", ".MSC")
+    $entries = New-Object System.Collections.Generic.List[string]
+
+    foreach ($entry in @([string]$env:PATHEXT -split ';')) {
+        $trimmed = $entry.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed)) {
+            continue
+        }
+
+        $normalized = $trimmed.ToUpperInvariant()
+        if (-not $entries.Contains($normalized)) {
+            $entries.Add($normalized) | Out-Null
+        }
+    }
+
+    foreach ($entry in $defaultEntries) {
+        if (-not $entries.Contains($entry)) {
+            $entries.Add($entry) | Out-Null
+        }
+    }
+
+    return ($entries.ToArray() -join ';')
+}
+
+function Normalize-WindowsCommandEnvironment {
+    $normalizedPathExt = Get-NormalizedWindowsPathExt
+    if ($env:PATHEXT -ne $normalizedPathExt) {
+        Write-Warn ("Normalizing PATHEXT for child processes: {0}" -f $normalizedPathExt)
+        $env:PATHEXT = $normalizedPathExt
+    }
+
+    $defaultComSpec = Join-Path $env:WINDIR 'System32\cmd.exe'
+    if ([string]::IsNullOrWhiteSpace($env:ComSpec) -or -not (Test-Path -LiteralPath $env:ComSpec -PathType Leaf)) {
+        Write-Warn ("Normalizing ComSpec for child processes: {0}" -f $defaultComSpec)
+        $env:ComSpec = $defaultComSpec
+    }
+}
+
+function Format-CmdArgument {
+    param([string]$Value)
+
+    if ($null -eq $Value) {
+        return '""'
+    }
+
+    if ($Value -notmatch '[\s"&|<>^()]') {
+        return $Value
+    }
+
+    return '"' + ($Value -replace '"', '""') + '"'
+}
+
+function Invoke-CmdScriptPassthrough {
+    param(
+        [string]$ScriptPath,
+        [string[]]$Arguments
+    )
+
+    $systemRoot = $env:SystemRoot
+    if ([string]::IsNullOrWhiteSpace($systemRoot)) {
+        $systemRoot = 'C:\Windows'
+    }
+
+    $cmdExe = Join-Path $systemRoot 'System32\cmd.exe'
+    if (-not (Test-Path -LiteralPath $cmdExe)) {
+        $cmdExe = 'cmd.exe'
+    }
+
+    $commandLine = 'call {0}' -f (Format-CmdArgument -Value $ScriptPath)
+    foreach ($argument in @($Arguments)) {
+        $commandLine += ' ' + (Format-CmdArgument -Value $argument)
+    }
+
+    $previousPath = $env:Path
+    $scriptDir = Split-Path -Path $ScriptPath -Parent
+    if (-not [string]::IsNullOrWhiteSpace($scriptDir)) {
+        $env:Path = $scriptDir + ';' + $env:Path
+    }
+
+    try {
+        $process = Start-Process -FilePath $cmdExe -ArgumentList @('/d', '/c', $commandLine) -NoNewWindow -Wait -PassThru
+        return $process.ExitCode
+    } finally {
+        $env:Path = $previousPath
+    }
+}
+
+function Invoke-ProcessPassthrough {
+    param(
+        [string]$FilePath,
+        [string[]]$Arguments,
+        [string]$PathPrefix = $null
+    )
+
+    $previousPath = $env:Path
+    if (-not [string]::IsNullOrWhiteSpace($PathPrefix)) {
+        $env:Path = $PathPrefix + ';' + $env:Path
+    }
+
+    try {
+        $process = Start-Process -FilePath $FilePath -ArgumentList $Arguments -NoNewWindow -Wait -PassThru
+        return $process.ExitCode
+    } finally {
+        $env:Path = $previousPath
+    }
+}
+
 function Ensure-Directory {
     param([string]$Path)
     if (-not [string]::IsNullOrWhiteSpace($Path) -and -not (Test-Path -LiteralPath $Path)) {
@@ -563,8 +671,10 @@ function Build-BundleFromScratch {
 
     $nodeExe = Join-Path $bundleRoot "node.exe"
     $npmCmd = Join-Path $bundleRoot "npm.cmd"
+    $npmCli = Join-Path $bundleRoot "node_modules\npm\bin\npm-cli.js"
     if (-not $DryRun -and -not (Test-Path -LiteralPath $nodeExe)) { Write-Err "node.exe was not found in the extracted Node runtime." }
     if (-not $DryRun -and -not (Test-Path -LiteralPath $npmCmd)) { Write-Err "npm.cmd was not found in the extracted Node runtime." }
+    if (-not $DryRun -and -not (Test-Path -LiteralPath $npmCli)) { Write-Err "npm-cli.js was not found in the extracted Node runtime." }
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) { Write-Err "Git is required on the build machine to assemble the bundle." }
 
     foreach ($registry in $registries) {
@@ -586,13 +696,14 @@ function Build-BundleFromScratch {
 
         try {
             Invoke-WithGitHubHttpsRewrite {
-                & $npmCmd install -g ("openclaw@{0}" -f $profile.PackageTag) --prefix $bundleRoot --loglevel error --fund false --audit false 2>&1 | Out-Host
-                if ($LASTEXITCODE -ne 0) {
-                    throw "npm install returned exit code $LASTEXITCODE."
+                $exitCode = Invoke-ProcessPassthrough -FilePath $nodeExe -Arguments @($npmCli, 'install', '-g', ("openclaw@{0}" -f $profile.PackageTag), '--prefix', $bundleRoot, '--loglevel', 'error', '--fund', 'false', '--audit', 'false') -PathPrefix $bundleRoot
+                if ($exitCode -ne 0) {
+                    throw "npm install returned exit code $exitCode."
                 }
-                & $npmCmd install -g ccman --prefix $bundleRoot --loglevel error --fund false --audit false 2>&1 | Out-Host
-                if ($LASTEXITCODE -ne 0) {
-                    throw "ccman install returned exit code $LASTEXITCODE."
+
+                $exitCode = Invoke-ProcessPassthrough -FilePath $nodeExe -Arguments @($npmCli, 'install', '-g', 'ccman', '--prefix', $bundleRoot, '--loglevel', 'error', '--fund', 'false', '--audit', 'false') -PathPrefix $bundleRoot
+                if ($exitCode -ne 0) {
+                    throw "ccman install returned exit code $exitCode."
                 }
             }
             break
@@ -1448,6 +1559,7 @@ function Build-OneClickInstaller {
 }
 
 try {
+    Normalize-WindowsCommandEnvironment
     Build-OneClickInstaller
 } finally {
     if (-not $KeepIntermediate -and $script:BuildRoot -and (Test-Path -LiteralPath $script:BuildRoot)) {
