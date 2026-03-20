@@ -87,6 +87,22 @@ $script:Installer = [ordered]@{
     LicenseStatus      = "not-required"
     LicenseProduct     = "windows-open"
     RuntimeControlMode = "none"
+    LastHealthState    = "unknown"
+    GatewayTokenState  = [ordered]@{
+        status  = "unknown"
+        mode    = "token"
+        source  = "unknown"
+        message = $null
+    }
+    ProviderAuthState  = [ordered]@{
+        status   = "unknown"
+        provider = $null
+        source   = "unknown"
+        message  = $null
+    }
+    LastStartReason    = $null
+    LastDashboardMode  = "none"
+    PostInstallSummary = $null
     EnableProgressBars = $true
 }
 
@@ -198,6 +214,127 @@ function Get-OptionalObjectProperty {
     }
 
     return $DefaultValue
+}
+
+function Get-InstallerStateValue {
+    param(
+        [string]$Key,
+        $DefaultValue = $null
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Key)) {
+        return $DefaultValue
+    }
+
+    if ($script:Installer.Contains($Key)) {
+        $value = $script:Installer[$Key]
+        if ($null -ne $value) {
+            return $value
+        }
+    }
+
+    return $DefaultValue
+}
+
+function Get-DefaultInstallerGatewayTokenState {
+    return [ordered]@{
+        status  = "unknown"
+        mode    = "token"
+        source  = "unknown"
+        message = $null
+    }
+}
+
+function Get-DefaultInstallerProviderAuthState {
+    return [ordered]@{
+        status   = "unknown"
+        provider = $null
+        source   = "unknown"
+        message  = $null
+    }
+}
+
+function Convert-InstallerStateLikeToOrderedMap {
+    param(
+        [object]$InputObject,
+        [hashtable]$Defaults = $null
+    )
+
+    $payload = [ordered]@{}
+    if ($Defaults) {
+        foreach ($entry in $Defaults.GetEnumerator()) {
+            $payload[$entry.Key] = $entry.Value
+        }
+    }
+
+    if ($null -eq $InputObject) {
+        return $payload
+    }
+
+    if ($InputObject -is [System.Collections.IDictionary]) {
+        foreach ($key in $InputObject.Keys) {
+            $payload["$key"] = $InputObject[$key]
+        }
+        return $payload
+    }
+
+    foreach ($property in $InputObject.PSObject.Properties) {
+        $payload[$property.Name] = $property.Value
+    }
+
+    return $payload
+}
+
+function Get-PersistedInstallerGatewayTokenState {
+    $payload = Convert-InstallerStateLikeToOrderedMap -InputObject (Get-InstallerStateValue -Key "GatewayTokenState") -Defaults (Get-DefaultInstallerGatewayTokenState)
+    if ([string]::IsNullOrWhiteSpace("$($payload.status)")) {
+        $payload.status = "unknown"
+    }
+    if ([string]::IsNullOrWhiteSpace("$($payload.mode)")) {
+        $payload.mode = "token"
+    }
+    if ([string]::IsNullOrWhiteSpace("$($payload.source)")) {
+        $payload.source = "unknown"
+    }
+    if ($payload.Contains("message") -and [string]::IsNullOrWhiteSpace("$($payload.message)")) {
+        $payload.message = $null
+    }
+
+    return $payload
+}
+
+function Get-PersistedInstallerProviderAuthState {
+    $payload = Convert-InstallerStateLikeToOrderedMap -InputObject (Get-InstallerStateValue -Key "ProviderAuthState") -Defaults (Get-DefaultInstallerProviderAuthState)
+    if ([string]::IsNullOrWhiteSpace("$($payload.status)")) {
+        $payload.status = "unknown"
+    }
+    if ([string]::IsNullOrWhiteSpace("$($payload.source)")) {
+        $payload.source = "unknown"
+    }
+    if ($payload.Contains("provider") -and [string]::IsNullOrWhiteSpace("$($payload.provider)")) {
+        $payload.provider = $null
+    }
+    if ($payload.Contains("message") -and [string]::IsNullOrWhiteSpace("$($payload.message)")) {
+        $payload.message = $null
+    }
+
+    return $payload
+}
+
+function Set-InstallerPostInstallState {
+    param([object]$Readiness)
+
+    if ($null -eq $Readiness) {
+        return
+    }
+
+    $script:Installer["LastHealthState"] = if ([string]::IsNullOrWhiteSpace("$($Readiness.HealthState)")) { "unknown" } else { "$($Readiness.HealthState)" }
+    $script:Installer["GatewayTokenState"] = (Convert-InstallerStateLikeToOrderedMap -InputObject $Readiness.GatewayTokenState -Defaults (Get-DefaultInstallerGatewayTokenState))
+    $script:Installer["ProviderAuthState"] = (Convert-InstallerStateLikeToOrderedMap -InputObject $Readiness.ProviderAuthState -Defaults (Get-DefaultInstallerProviderAuthState))
+    $script:Installer["LastStartReason"] = if ([string]::IsNullOrWhiteSpace("$($Readiness.LastStartReason)")) { $null } else { "$($Readiness.LastStartReason)" }
+    $script:Installer["LastDashboardMode"] = if ([string]::IsNullOrWhiteSpace("$($Readiness.LastDashboardMode)")) { "none" } else { "$($Readiness.LastDashboardMode)" }
+    $script:Installer["PostInstallSummary"] = if ([string]::IsNullOrWhiteSpace("$($Readiness.Summary)")) { $null } else { "$($Readiness.Summary)" }
+    Save-InstallState
 }
 
 function Get-DefaultCapabilityState {
@@ -3641,7 +3778,7 @@ function Save-InstallState {
         architecture          = $script:Installer.Architecture
         installedVersion      = $script:Installer.InstalledVersion
         lastKnownGoodVersion  = $script:Installer.InstalledVersion
-        lastHealthState       = "unknown"
+        lastHealthState       = (Get-InstallerStateValue -Key "LastHealthState" -DefaultValue "unknown")
         dataRoot              = $script:Installer.DataRoot
         bundleRoot            = $script:Installer.BundleRoot
         sourceRoot            = $script:Installer.SourceRoot
@@ -3661,20 +3798,10 @@ function Save-InstallState {
         startMode             = "local-stable"
         capabilities          = $persistedCapabilities
         capabilitiesRuntimeVersion = if ($null -ne $seededCapabilities) { $normalizedInstalledVersion } else { $null }
-        gatewayTokenState     = [ordered]@{
-            status  = "unknown"
-            mode    = "token"
-            source  = "unknown"
-            message = $null
-        }
-        providerAuthState     = [ordered]@{
-            status   = "unknown"
-            provider = $null
-            source   = "unknown"
-            message  = $null
-        }
-        lastStartReason       = $null
-        lastDashboardMode     = "none"
+        gatewayTokenState     = (Get-PersistedInstallerGatewayTokenState)
+        providerAuthState     = (Get-PersistedInstallerProviderAuthState)
+        lastStartReason       = (Get-InstallerStateValue -Key "LastStartReason" -DefaultValue $null)
+        lastDashboardMode     = (Get-InstallerStateValue -Key "LastDashboardMode" -DefaultValue "none")
         launcherPath          = $script:Installer.LauncherPath
         maintenanceExecutablePath = $script:Installer.MaintenanceExecutablePath
         desktopStartPath      = $script:Installer.DesktopStartPath
@@ -4455,6 +4582,24 @@ function Get-FirstProviderRefFromText {
     return $null
 }
 
+function Get-InstalledGatewayTokenSource {
+    param([string]$TokenText)
+
+    if ([string]::IsNullOrWhiteSpace($TokenText)) {
+        return "missing"
+    }
+
+    $trimmed = $TokenText.Trim()
+    if ($trimmed.StartsWith("{") -or $trimmed.StartsWith("[")) {
+        return "config-secretref"
+    }
+    if ($trimmed -match '(?i)(secretref|vault|1password|op://|source)') {
+        return "config-secretref"
+    }
+
+    return "config"
+}
+
 function Find-InstalledProviderAuthNode {
     param(
         [object]$ProvidersNode,
@@ -4593,25 +4738,46 @@ function Ensure-PostInstallGatewayTokenReady {
     }
 
     if ($mode -eq "none") {
+        $state = [ordered]@{
+            status  = "not-required"
+            mode    = $mode
+            source  = "config"
+            message = "gateway.auth.mode is set to none."
+        }
         return [pscustomobject]@{
             Ready   = $true
             Summary = (L "Gateway auth 已显式关闭。" "Gateway auth is explicitly disabled.")
+            State   = [pscustomobject]$state
         }
     }
 
     $envToken = [Environment]::GetEnvironmentVariable("OPENCLAW_GATEWAY_TOKEN")
     if (-not [string]::IsNullOrWhiteSpace($envToken)) {
+        $state = [ordered]@{
+            status  = "available"
+            mode    = $mode
+            source  = "env"
+            message = "Gateway token is available from OPENCLAW_GATEWAY_TOKEN."
+        }
         return [pscustomobject]@{
             Ready   = $true
             Summary = (L "Gateway token 已通过环境变量提供。" "Gateway token is already available from the environment.")
+            State   = [pscustomobject]$state
         }
     }
 
     $tokenResult = Get-InstalledConfigTextValue -Key "gateway.auth.token"
     if ($tokenResult.Success -and -not [string]::IsNullOrWhiteSpace("$($tokenResult.Value)")) {
+        $state = [ordered]@{
+            status  = "available"
+            mode    = $mode
+            source  = (Get-InstalledGatewayTokenSource -TokenText "$($tokenResult.Value)")
+            message = "Gateway token is configured."
+        }
         return [pscustomobject]@{
             Ready   = $true
             Summary = (L "Gateway token 已写入配置。" "Gateway token is already configured.")
+            State   = [pscustomobject]$state
         }
     }
 
@@ -4620,17 +4786,31 @@ function Ensure-PostInstallGatewayTokenReady {
     if (-not $doctorResult.TimedOut -and $doctorResult.ExitCode -eq 0) {
         $tokenResult = Get-InstalledConfigTextValue -Key "gateway.auth.token"
         if ($tokenResult.Success -and -not [string]::IsNullOrWhiteSpace("$($tokenResult.Value)")) {
+            $state = [ordered]@{
+                status  = "generated"
+                mode    = $mode
+                source  = (Get-InstalledGatewayTokenSource -TokenText "$($tokenResult.Value)")
+                message = "Gateway token was generated automatically."
+            }
             return [pscustomobject]@{
                 Ready   = $true
                 Summary = (L "已自动生成 Gateway token。" "Gateway token was generated automatically.")
+                State   = [pscustomobject]$state
             }
         }
     }
 
     Write-InstalledCommandOutput -Result $doctorResult -Prefix "gateway-token"
+    $state = [ordered]@{
+        status  = "missing-compatible"
+        mode    = $mode
+        source  = "none"
+        message = "Gateway token is still missing."
+    }
     return [pscustomobject]@{
         Ready   = $false
         Summary = (L "Gateway token 仍未就绪。" "Gateway token is still missing.")
+        State   = [pscustomobject]$state
     }
 }
 
@@ -4640,6 +4820,7 @@ function Test-PostInstallDashboardReady {
         return [pscustomobject]@{
             Ready   = $false
             Summary = (L "Dashboard 预检超时。" "Dashboard verification timed out.")
+            Reason  = "dashboard_timeout"
         }
     }
 
@@ -4648,6 +4829,7 @@ function Test-PostInstallDashboardReady {
         return [pscustomobject]@{
             Ready   = $false
             Summary = (L "Dashboard 预检失败。" "Dashboard verification failed.")
+            Reason  = "dashboard_verify_failed"
         }
     }
 
@@ -4657,6 +4839,7 @@ function Test-PostInstallDashboardReady {
         return [pscustomobject]@{
             Ready   = $false
             Summary = (L "Dashboard 预检未返回可用地址。" "Dashboard verification did not return a usable URL.")
+            Reason  = "dashboard_verify_failed"
         }
     }
 
@@ -4664,6 +4847,7 @@ function Test-PostInstallDashboardReady {
         Ready   = $true
         Summary = (L "Dashboard 已返回可用地址。" "Dashboard returned a usable URL.")
         Url     = $dashboardUrl
+        Reason  = "ready"
     }
 }
 
@@ -4718,6 +4902,12 @@ function Resolve-PostInstallProviderAuthState {
     }
 
     $providerDisplay = if ([string]::IsNullOrWhiteSpace("$providerName")) { (L "当前 provider" "the current provider") } else { $providerName }
+    $state = [ordered]@{
+        status   = $status
+        provider = $providerName
+        source   = $source
+        message  = $message
+    }
     return [pscustomobject]@{
         Ready             = ($status -ne "missing")
         RequiresAttention = ($status -eq "missing")
@@ -4725,6 +4915,7 @@ function Resolve-PostInstallProviderAuthState {
         Status            = $status
         Source            = $source
         Summary           = if ($status -eq "missing") { (L ("Dashboard 已可用，但 {0} 的模型认证仍缺失。" -f $providerDisplay) ("Dashboard is reachable, but model auth for {0} is still missing." -f $providerDisplay)) } else { $message }
+        State             = [pscustomobject]$state
     }
 }
 
@@ -4736,6 +4927,11 @@ function Test-PostInstallReadiness {
             RequiresInteractiveFallback = $false
             FallbackProvider            = $null
             Summary                     = $null
+            HealthState                 = "healthy"
+            GatewayTokenState           = [pscustomobject](Get-DefaultInstallerGatewayTokenState)
+            ProviderAuthState           = [pscustomobject](Get-DefaultInstallerProviderAuthState)
+            LastStartReason             = "local_stable_ready"
+            LastDashboardMode           = "none"
         }
     }
 
@@ -4780,11 +4976,37 @@ function Test-PostInstallReadiness {
         $summaryParts.Add($providerAuth.Summary) | Out-Null
     }
 
+    $healthState = if ($requiresInteractiveFallback) { "needs-attention" } else { "healthy" }
+    $lastStartReason = if (-not $gatewayToken.Ready) {
+        "gateway_token_missing"
+    } elseif (-not $dashboard.Ready) {
+        $dashboard.Reason
+    } elseif ($providerAuth.RequiresAttention) {
+        "provider_auth_missing"
+    } elseif ($providerAuth.Status -eq "unknown") {
+        "provider_auth_unknown"
+    } else {
+        "local_stable_ready"
+    }
+    $lastDashboardMode = if (-not $dashboard.Ready) { "verify-hard-fail" } else { "none" }
+    $summary = if ($summaryParts.Count -gt 0) {
+        $summaryParts -join " "
+    } elseif ($providerAuth.Status -eq "unknown") {
+        $providerAuth.Summary
+    } else {
+        (L "安装后的本地就绪检查通过。" "Post-install local readiness checks passed.")
+    }
+
     return [pscustomobject]@{
         Ready                       = (-not $requiresInteractiveFallback)
         RequiresInteractiveFallback = $requiresInteractiveFallback
         FallbackProvider            = $(if ($providerAuth.RequiresAttention) { $providerAuth.Provider } else { $null })
-        Summary                     = $(if ($summaryParts.Count -gt 0) { $summaryParts -join " " } else { $null })
+        Summary                     = $summary
+        HealthState                 = $healthState
+        GatewayTokenState           = $gatewayToken.State
+        ProviderAuthState           = $providerAuth.State
+        LastStartReason             = $lastStartReason
+        LastDashboardMode           = $lastDashboardMode
     }
 }
 
@@ -4864,6 +5086,7 @@ function Invoke-AutomatedPostInstallBootstrap {
             Automated                   = $false
             RequiresInteractiveFallback = $true
             FallbackProvider            = $null
+            Reason                      = "post_install_bootstrap_timeout"
             ReadinessSummary            = (L "自动初始化配置超时。" "Automated bootstrap timed out.")
         }
     }
@@ -4875,6 +5098,7 @@ function Invoke-AutomatedPostInstallBootstrap {
             Automated                   = $false
             RequiresInteractiveFallback = $true
             FallbackProvider            = $null
+            Reason                      = "post_install_bootstrap_failed"
             ReadinessSummary            = (L "自动初始化配置失败。" "Automated bootstrap failed.")
         }
     }
@@ -4889,6 +5113,7 @@ function Invoke-AutomatedPostInstallBootstrap {
         Automated                   = $true
         RequiresInteractiveFallback = $false
         FallbackProvider            = $null
+        Reason                      = $null
         ReadinessSummary            = $null
     }
 }
@@ -5033,6 +5258,10 @@ function Show-SuccessSummary {
     }
     Write-Host ("{0}: {1}" -f (L "授权模式" "License mode"), $script:Installer.RuntimeControlMode) -ForegroundColor Green
     Write-Host ("{0}: {1}" -f (L "授权状态摘要" "License status"), $script:Installer.LicenseStatus) -ForegroundColor Green
+    if (-not [string]::IsNullOrWhiteSpace("$(Get-InstallerStateValue -Key PostInstallSummary)")) {
+        $postInstallColor = if (((Get-InstallerStateValue -Key "LastHealthState" -DefaultValue "unknown") -eq "healthy") -and ((Get-InstallerStateValue -Key "LastStartReason" -DefaultValue "unknown") -eq "local_stable_ready")) { "Green" } else { "Yellow" }
+        Write-Host ("{0}: {1}" -f (L "安装后校验" "Post-install check"), (Get-InstallerStateValue -Key "PostInstallSummary")) -ForegroundColor $postInstallColor
+    }
     Write-Host ("{0}: {1}" -f (L "经典控制台粘贴" "Classic console paste"), (L "已为当前账号开启" "Enabled for the current user")) -ForegroundColor Green
     Write-Host ("{0}: {1}" -f (L "日志" "Log"), $script:Installer.LogFile) -ForegroundColor Gray
     Write-Host ""
@@ -5080,8 +5309,15 @@ function Invoke-InstallFlow {
             if ($licenseActivated) {
                 $postInstallBootstrap = Invoke-AutomatedPostInstallBootstrap
                 Run-Doctor
-                if ($null -ne $postInstallBootstrap -and $postInstallBootstrap.Automated -and -not $postInstallBootstrap.RequiresInteractiveFallback) {
+                if ($null -ne $postInstallBootstrap -and $postInstallBootstrap.RequiresInteractiveFallback) {
+                    $script:Installer["LastHealthState"] = "needs-attention"
+                    $script:Installer["LastStartReason"] = if ([string]::IsNullOrWhiteSpace("$($postInstallBootstrap.Reason)")) { "post_install_bootstrap_failed" } else { "$($postInstallBootstrap.Reason)" }
+                    $script:Installer["LastDashboardMode"] = "none"
+                    $script:Installer["PostInstallSummary"] = if ([string]::IsNullOrWhiteSpace("$($postInstallBootstrap.ReadinessSummary)")) { (L "安装后的自动配置未完成，已准备打开配置引导。" "Post-install auto configuration is incomplete and onboarding will be reopened.") } else { $postInstallBootstrap.ReadinessSummary }
+                    Save-InstallState
+                } elseif ($null -ne $postInstallBootstrap -and $postInstallBootstrap.Automated) {
                     $readiness = Test-PostInstallReadiness
+                    Set-InstallerPostInstallState -Readiness $readiness
                     if ($readiness.RequiresInteractiveFallback) {
                         $postInstallBootstrap.RequiresInteractiveFallback = $true
                         $postInstallBootstrap.FallbackProvider = $readiness.FallbackProvider
@@ -5092,7 +5328,13 @@ function Invoke-InstallFlow {
                     }
                 }
             } else {
-                Write-Warn (L "授权二次确认未完成；仍将打开配置窗口，后续可在配置窗口继续完成授权与初始化。" "Post-install license recheck did not complete; opening configuration window anyway so authorization and initialization can continue there.")
+                $licenseSummary = (L "授权二次确认未完成；仍将打开配置窗口，后续可在配置窗口继续完成授权与初始化。" "Post-install license recheck did not complete; opening configuration window anyway so authorization and initialization can continue there.")
+                Write-Warn $licenseSummary
+                $script:Installer["LastHealthState"] = "needs-attention"
+                $script:Installer["LastStartReason"] = "post_install_license_incomplete"
+                $script:Installer["LastDashboardMode"] = "none"
+                $script:Installer["PostInstallSummary"] = $licenseSummary
+                Save-InstallState
             }
             Show-SuccessSummary
             if (-not $licenseActivated -or ($null -ne $postInstallBootstrap -and $postInstallBootstrap.RequiresInteractiveFallback)) {

@@ -330,3 +330,45 @@ If provider auth is still missing after install:
   - immediately open targeted provider onboarding/auth repair
   - leave first Start focused on stable runtime recovery, not first-time auth surprise
 ```
+
+
+## 2026-03-20 state persistence follow-up
+
+The first fix corrected the install-time readiness contract. A second follow-up now
+makes that result visible and durable instead of leaving it implicit in the log.
+
+### Added install-state persistence
+
+The installer now persists the same readiness dimensions that the maintenance
+script already uses later:
+
+- last health state
+- gateway token state
+- provider auth state
+- last start reason
+- last dashboard mode
+
+This means the machine state written immediately after install is no longer a
+blank "unknown" snapshot when the installer already knows what happened.
+
+### Added install-summary honesty improvements
+
+The installer success summary now prints the post-install readiness summary and
+colors it conservatively:
+
+- green only when local readiness reached the expected `local_stable_ready` state
+- yellow when install completed but follow-up is still needed or auth state could
+  not be classified confidently
+
+### Failure-path persistence improvements
+
+When automated post-install bootstrap cannot finish cleanly, the installer now
+persists a concrete reason instead of only a generic needs-attention state.
+Current reasons include:
+
+- `post_install_bootstrap_timeout`
+- `post_install_bootstrap_failed`
+- `post_install_license_incomplete`
+
+That keeps install-time diagnostics aligned with the later maintenance result
+model and makes support triage more direct.
