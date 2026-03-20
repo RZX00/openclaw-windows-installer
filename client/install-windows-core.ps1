@@ -56,6 +56,8 @@ $script:Installer = [ordered]@{
     DataRoot           = $null
     BundleRoot         = $null
     SupportRoot        = $null
+    ReportsRoot        = $null
+    StoreReportsRoot   = $null
     InstallStatePath   = $null
     ToolRoot           = $null
     SourceRoot         = $null
@@ -850,6 +852,8 @@ function Initialize-InstallerContext {
     $script:Installer.DataRoot = Join-Path $env:ProgramData "OpenClaw"
     $script:Installer.BundleRoot = Join-Path $script:Installer.DataRoot "bundles"
     $script:Installer.SupportRoot = Join-Path $script:Installer.DataRoot "support"
+    $script:Installer.ReportsRoot = Join-Path $script:Installer.DataRoot "reports"
+    $script:Installer.StoreReportsRoot = Join-Path $script:Installer.ReportsRoot "store"
     $script:Installer.InstallStatePath = Join-Path $script:Installer.DataRoot "install-state.json"
     $script:Installer.LicenseStatePath = Join-Path $script:Installer.DataRoot "license-state.json"
     $script:Installer.ToolRoot = Join-Path $script:Installer.DataRoot "tools"
@@ -862,6 +866,8 @@ function Initialize-InstallerContext {
     Ensure-Directory -Path $script:Installer.DataRoot
     Ensure-Directory -Path $script:Installer.BundleRoot
     Ensure-Directory -Path $script:Installer.SupportRoot
+    Ensure-Directory -Path $script:Installer.ReportsRoot
+    Ensure-Directory -Path $script:Installer.StoreReportsRoot
     Ensure-Directory -Path $script:Installer.ToolRoot
     Ensure-Directory -Path $script:Installer.SourceRoot
     Ensure-Directory -Path $logRoot
@@ -1132,7 +1138,7 @@ function Save-JsonFile {
         [object]$Object
     )
 
-    $json = $Object | ConvertTo-Json -Depth 8
+    $json = $Object | ConvertTo-Json -Depth 16
     [System.IO.File]::WriteAllText($Path, $json, (New-Object System.Text.UTF8Encoding($true)))
 }
 
@@ -3786,6 +3792,8 @@ function Save-InstallState {
         wrapperDir            = $script:Installer.WrapperDir
         wrapperPath           = (Join-Path $script:Installer.WrapperDir "openclaw.cmd")
         supportDir            = $script:Installer.SupportRoot
+        reportsRoot           = $script:Installer.ReportsRoot
+        storeReportsRoot      = $script:Installer.StoreReportsRoot
         coreInstallerPath     = (Join-Path $script:Installer.SupportRoot "install-windows-core.ps1")
         maintenanceScriptPath = $script:Installer.MaintenanceScriptPath
         licenseExecutablePath = $script:Installer.LicenseExecutablePath

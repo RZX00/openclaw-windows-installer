@@ -34,6 +34,8 @@ $script:Installer = [ordered]@{
     SourceLock = $null
     RuntimeSourceRoot = $null
     OpenClawRoot = $null
+    ReportsRoot = $null
+    StoreReportsRoot = $null
     InstallStatePath = $null
     SupportRoot = $null
     SupportArchivePath = $null
@@ -53,6 +55,7 @@ $script:Installer = [ordered]@{
     Provisioning = New-Object System.Collections.Generic.List[object]
     Prerequisites = New-Object System.Collections.Generic.List[object]
     Readiness = $null
+    LastReportInfo = $null
 }
 
 function Write-Info($Message) { Write-Host "[INFO] $Message" -ForegroundColor Cyan }
@@ -162,7 +165,7 @@ function Save-JsonFile {
         return
     }
 
-    $json = $Object | ConvertTo-Json -Depth 12
+    $json = $Object | ConvertTo-Json -Depth 16
     [System.IO.File]::WriteAllText($Path, $json, (New-Object System.Text.UTF8Encoding($true)))
 }
 
@@ -498,17 +501,169 @@ function Quote-CmdArg {
     return '"' + $text.Replace('"', '\"') + '"'
 }
 
+function Add-UniqueWorkflowPackString {
+    param(
+        [System.Collections.Generic.List[string]]$List,
+        [string]$Value
+    )
+
+    if ($null -eq $List -or [string]::IsNullOrWhiteSpace($Value)) {
+        return
+    }
+
+    $trimmed = $Value.Trim()
+    if ([string]::IsNullOrWhiteSpace($trimmed)) {
+        return
+    }
+
+    foreach ($existing in $List) {
+        if ([string]::Equals($existing, $trimmed, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return
+        }
+    }
+
+    $List.Add($trimmed) | Out-Null
+}
+
+function Get-WorkflowPackCatalogConfig {
+    return (Get-ObjectPropertyValue -Object $script:Installer.Manifest -Name "catalog")
+}
+
+function Get-WorkflowPackItemId {
+    if (-not [string]::IsNullOrWhiteSpace($script:Installer.PackId)) {
+        return $script:Installer.PackId
+    }
+
+    return $PackId
+}
+
+function Get-WorkflowPackEffectiveOpenClawRoot {
+    if (-not [string]::IsNullOrWhiteSpace($script:Installer.OpenClawRoot)) {
+        return $script:Installer.OpenClawRoot
+    }
+
+    return $OpenClawRoot
+}
+
+function Get-WorkflowPackItemType {
+    $catalog = Get-WorkflowPackCatalogConfig
+    $itemType = "$(Get-ObjectPropertyValue -Object $catalog -Name 'itemType')"
+    if ([string]::IsNullOrWhiteSpace($itemType)) {
+        return "capability-pack"
+    }
+
+    return $itemType
+}
+
+function Get-WorkflowPackPluginIds {
+    $pluginIds = New-Object System.Collections.Generic.List[string]
+    foreach ($candidate in @(Convert-ToArray -Value (Get-ObjectPropertyValue -Object $script:Installer.Manifest -Name "pluginIds"))) {
+        Add-UniqueWorkflowPackString -List $pluginIds -Value "$candidate"
+    }
+
+    Add-UniqueWorkflowPackString -List $pluginIds -Value "$(Get-ObjectPropertyValue -Object $script:Installer.Manifest -Name 'pluginId')"
+    return @($pluginIds.ToArray())
+}
+
+function Get-WorkflowPackReadinessLabel {
+    param([string]$Status)
+
+    switch ("$Status") {
+        "ready" { return "Ready" }
+        "needs-setup" { return "Needs Setup" }
+        default { return "Needs Repair" }
+    }
+}
+
+function New-WorkflowPackDefaultReadiness {
+    param([string]$Summary = "Workflow pack verification did not complete.")
+
+    return [pscustomobject]@{
+        status                   = "needs-repair"
+        state                    = "Needs Repair"
+        summary                  = $Summary
+        unresolvedRequiredSkills = @()
+        integrityIssues          = @()
+        provisioningFailures     = @()
+        blockingPrerequisites    = @()
+        warningPrerequisites     = @()
+    }
+}
+
+function Get-WorkflowPackCurrentReadiness {
+    if ($null -ne $script:Installer.Readiness) {
+        return $script:Installer.Readiness
+    }
+
+    return (New-WorkflowPackDefaultReadiness -Summary "Workflow pack installation did not produce a readiness result.")
+}
+
+function Test-WorkflowPackOperationSuccess {
+    param([object]$Readiness = $null)
+
+    if ($null -eq $Readiness) {
+        $Readiness = Get-WorkflowPackCurrentReadiness
+    }
+
+    return ("$($Readiness.status)" -ne "needs-repair")
+}
+
+function New-WorkflowPackReportPaths {
+    param([datetime]$GeneratedAt = ([datetime]::UtcNow))
+
+    $itemId = Get-WorkflowPackItemId
+    $effectiveOpenClawRoot = Get-WorkflowPackEffectiveOpenClawRoot
+    $storeReportsRoot = if (-not [string]::IsNullOrWhiteSpace($script:Installer.StoreReportsRoot)) {
+        $script:Installer.StoreReportsRoot
+    } elseif (-not [string]::IsNullOrWhiteSpace($effectiveOpenClawRoot)) {
+        Join-Path (Join-Path $effectiveOpenClawRoot "reports") "store"
+    } else {
+        $null
+    }
+    $reportRoot = if (-not [string]::IsNullOrWhiteSpace($storeReportsRoot)) {
+        Join-Path $storeReportsRoot $itemId
+    } else {
+        $null
+    }
+
+    $timestamp = $GeneratedAt.ToUniversalTime().ToString("yyyyMMddTHHmmssZ")
+    return [pscustomobject]@{
+        reportRoot  = $reportRoot
+        latestPath  = $(if (-not [string]::IsNullOrWhiteSpace($reportRoot)) { Join-Path $reportRoot "latest.json" } else { $null })
+        historyPath = $(if (-not [string]::IsNullOrWhiteSpace($reportRoot)) { Join-Path $reportRoot ($timestamp + ".json") } else { $null })
+    }
+}
+
 function Add-VerificationEntry {
     param(
         [string]$Name,
-        [int]$ExitCode,
-        [string]$Message
+        [int]$ExitCode = 0,
+        [Alias('Message')]
+        [string]$Summary,
+        [bool]$TimedOut = $false,
+        [string[]]$Arguments = @(),
+        [string]$Category = "workflow-pack",
+        [string]$Severity = $null,
+        [bool]$Repairable = $false
     )
 
+    if ([string]::IsNullOrWhiteSpace($Summary)) {
+        $Summary = if ($TimedOut) { "Command timed out." } elseif ($ExitCode -eq 0) { "Command completed successfully." } else { "Command returned a non-zero exit code." }
+    }
+    if ([string]::IsNullOrWhiteSpace($Severity)) {
+        $Severity = if ($TimedOut -or $ExitCode -ne 0) { "error" } else { "info" }
+    }
+
     $script:Installer.Verification.Add([pscustomobject]@{
-        name = $Name
-        exitCode = $ExitCode
-        message = $Message
+        name       = $Name
+        success    = (($ExitCode -eq 0) -and (-not $TimedOut))
+        summary    = $Summary
+        category   = $Category
+        severity   = $Severity
+        exitCode   = $ExitCode
+        timedOut   = [bool]$TimedOut
+        repairable = [bool]$Repairable
+        arguments  = @($Arguments)
     }) | Out-Null
 }
 
@@ -522,7 +677,7 @@ function Invoke-Probe {
 
     if ($script:Installer.DryRun) {
         Write-Note ("Dry-run probe: {0} {1}" -f $FilePath, ($Arguments -join " "))
-        Add-VerificationEntry -Name $Name -ExitCode 0 -Message "Dry-run"
+        Add-VerificationEntry -Name $Name -ExitCode 0 -Message "Dry-run" -Arguments @($Arguments)
         return
     }
 
@@ -537,7 +692,7 @@ function Invoke-Probe {
     $message = @($output | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 1)
     $summary = if ($message.Count -gt 0) { "$($message[0])".Trim() } elseif ($exitCode -eq 0) { "Command completed successfully." } else { "Command returned a non-zero exit code." }
 
-    Add-VerificationEntry -Name $Name -ExitCode $exitCode -Message $summary
+    Add-VerificationEntry -Name $Name -ExitCode $exitCode -Message $summary -Arguments @($Arguments)
 
     if ($exitCode -eq 0) {
         Write-Ok ("{0}: {1}" -f $Name, $summary)
@@ -561,7 +716,7 @@ function Assert-ProbeSucceeded {
     }
 
     if ($entry[0].exitCode -ne 0) {
-        Write-Err ("Required command failed for '{0}': {1}" -f $Name, $entry[0].message)
+        Write-Err ("Required command failed for '{0}': {1}" -f $Name, $entry[0].summary)
     }
 }
 
@@ -1022,6 +1177,8 @@ function Initialize-Context {
     $script:Installer.RuntimeSourceRoot = Resolve-RuntimeSourceRootCandidate
     $script:Installer.OpenClawRoot = if ([string]::IsNullOrWhiteSpace($OpenClawRoot)) { Resolve-DefaultOpenClawRoot } else { $OpenClawRoot }
     $script:Installer.InstallStatePath = Join-Path $script:Installer.OpenClawRoot "install-state.json"
+    $script:Installer.ReportsRoot = Join-Path $script:Installer.OpenClawRoot "reports"
+    $script:Installer.StoreReportsRoot = Join-Path $script:Installer.ReportsRoot "store"
     $script:Installer.BinDir = Join-Path $script:Installer.OpenClawRoot "bin"
     $script:Installer.OpenClawWrapperPath = Join-Path $script:Installer.BinDir "openclaw.cmd"
     $script:Installer.SupportRoot = Join-Path $script:Installer.OpenClawRoot ("support\workflow-packs\{0}" -f $script:Installer.PackId)
@@ -1043,6 +1200,8 @@ function Initialize-Context {
     }
 
     Ensure-Directory -Path $script:Installer.SupportRoot
+    Ensure-Directory -Path $script:Installer.ReportsRoot
+    Ensure-Directory -Path $script:Installer.StoreReportsRoot
     Ensure-Directory -Path $script:Installer.BinDir
     Ensure-Directory -Path (Split-Path -Path $script:Installer.RuntimeRoot -Parent)
 }
@@ -1216,15 +1375,18 @@ function Test-CommandAvailable {
 function Invoke-WorkflowPackPrerequisites {
     $results = New-Object System.Collections.Generic.List[object]
     foreach ($rule in @(Convert-ToArray -Value (Get-ObjectPropertyValue -Object $script:Installer.Manifest -Name "prerequisites"))) {
-        $ruleType = "$((Get-ObjectPropertyValue -Object $rule -Name 'type'))"
-        $severity = "$((Get-ObjectPropertyValue -Object $rule -Name 'severity' -Default 'warning'))"
-        $message = "$((Get-ObjectPropertyValue -Object $rule -Name 'message'))"
+        $ruleType = "$(Get-ObjectPropertyValue -Object $rule -Name 'type')"
+        $severity = "$(Get-ObjectPropertyValue -Object $rule -Name 'severity' -Default 'warning')"
+        $message = "$(Get-ObjectPropertyValue -Object $rule -Name 'message')"
+        $commandName = $null
         $success = $false
         $summary = $message
+        $manual = [bool](Get-ObjectPropertyValue -Object $rule -Name 'manual' -Default ($ruleType -eq 'manual-step'))
 
         switch ($ruleType) {
             "command-available" {
-                $success = Test-CommandAvailable -CommandName "$(Get-ObjectPropertyValue -Object $rule -Name 'command')"
+                $commandName = "$(Get-ObjectPropertyValue -Object $rule -Name 'command')"
+                $success = Test-CommandAvailable -CommandName $commandName
                 $summary = if ($success) { "Command is available." } else { $message }
             }
             "path-exists" {
@@ -1233,6 +1395,7 @@ function Invoke-WorkflowPackPrerequisites {
                 $summary = if ($success) { "Path exists." } else { $message }
             }
             "manual-step" {
+                $manual = $true
                 $success = $false
                 $summary = $message
             }
@@ -1243,11 +1406,14 @@ function Invoke-WorkflowPackPrerequisites {
         }
 
         $results.Add([pscustomobject]@{
-            id = "$(Get-ObjectPropertyValue -Object $rule -Name 'id')"
-            type = $ruleType
+            id       = "$(Get-ObjectPropertyValue -Object $rule -Name 'id')"
+            type     = $ruleType
             severity = $severity
-            success = [bool]$success
-            summary = $summary
+            success  = [bool]$success
+            manual   = [bool]$manual
+            summary  = $summary
+            message  = $(if ([string]::IsNullOrWhiteSpace($message)) { $null } else { $message })
+            command  = $(if ([string]::IsNullOrWhiteSpace($commandName)) { $null } else { $commandName })
         }) | Out-Null
     }
 
@@ -1259,29 +1425,67 @@ function Update-WorkflowPackReadiness {
     foreach ($entry in @(Convert-ToArray -Value (Get-ObjectPropertyValue -Object $script:Installer.SourceLock -Name "sources"))) {
         $isRequired = [bool](Get-ObjectPropertyValue -Object $entry -Name "required" -Default $false)
         if ($isRequired -and "$(Get-ObjectPropertyValue -Object $entry -Name 'status')" -ne "resolved") {
+            $skillId = "$(Get-ObjectPropertyValue -Object $entry -Name 'skillId')"
             $requiredSourceFailures += [pscustomobject]@{
-                skillId = "$(Get-ObjectPropertyValue -Object $entry -Name 'skillId')"
+                name    = $skillId
+                skillId = $skillId
                 summary = "$(Get-ObjectPropertyValue -Object $entry -Name 'summary')"
             }
         }
     }
 
-    $blockingPrereqs = @($script:Installer.Prerequisites | Where-Object { -not $_.success -and $_.severity -eq "error" })
-    $warningPrereqs = @($script:Installer.Prerequisites | Where-Object { -not $_.success -and $_.severity -ne "error" })
-    $status = if ($requiredSourceFailures.Count -gt 0 -or $blockingPrereqs.Count -gt 0) {
-        "needs-attention"
-    } elseif ($warningPrereqs.Count -gt 0) {
-        "warning"
+    $integrityIssues = @(
+        @($script:Installer.Verification.ToArray()) |
+            Where-Object { -not $_.success } |
+            ForEach-Object {
+                [pscustomobject]@{
+                    name    = $_.name
+                    summary = $_.summary
+                }
+            }
+    )
+    $provisioningFailures = @(
+        @($script:Installer.Provisioning.ToArray()) |
+            Where-Object { -not $_.success } |
+            ForEach-Object {
+                [pscustomobject]@{
+                    type    = $_.type
+                    path    = $_.path
+                    source  = $(if ($_.PSObject.Properties['source']) { $_.source } else { $null })
+                    success = [bool]$_.success
+                    summary = $_.summary
+                }
+            }
+    )
+    $failedPrerequisites = @(@($script:Installer.Prerequisites.ToArray()) | Where-Object { -not $_.success })
+    $blockingPrereqs = @($failedPrerequisites | Where-Object { $_.severity -eq "error" })
+    $warningPrereqs = @($failedPrerequisites | Where-Object { $_.severity -ne "error" })
+    $manualOutstanding = @($failedPrerequisites | Where-Object { $_.manual })
+    $automatedFailures = @($failedPrerequisites | Where-Object { -not $_.manual })
+
+    $status = if ($requiredSourceFailures.Count -gt 0 -or $provisioningFailures.Count -gt 0 -or $automatedFailures.Count -gt 0 -or $integrityIssues.Count -gt 0) {
+        "needs-repair"
+    } elseif ($manualOutstanding.Count -gt 0) {
+        "needs-setup"
     } else {
         "ready"
     }
 
+    $summary = switch ($status) {
+        "ready" { "Workflow pack is installed and ready." }
+        "needs-setup" { "Workflow pack payload is installed, but one or more manual setup steps are still required." }
+        default { "Workflow pack install completed, but verification found drift or missing assets that need repair." }
+    }
+
     $script:Installer.Readiness = [pscustomobject]@{
-        status = $status
-        summary = $(if ($status -eq "ready") { "Workflow pack is installed and ready." } elseif ($status -eq "warning") { "Workflow pack is installed, but some manual follow-up may still be required." } else { "Workflow pack is installed, but not all declared capabilities are ready yet." })
+        status                   = $status
+        state                    = (Get-WorkflowPackReadinessLabel -Status $status)
+        summary                  = $summary
         unresolvedRequiredSkills = @($requiredSourceFailures)
-        blockingPrerequisites = @($blockingPrereqs)
-        warningPrerequisites = @($warningPrereqs)
+        integrityIssues          = @($integrityIssues)
+        provisioningFailures     = @($provisioningFailures)
+        blockingPrerequisites    = @($blockingPrereqs)
+        warningPrerequisites     = @($warningPrereqs)
     }
 }
 
@@ -1312,58 +1516,116 @@ function Save-WorkflowPackState {
     Ensure-NoteProperty -Object $state -Name "workflowPacks" -Value ([pscustomobject]@{})
 
     $workflowPackPropertyNames = @($state.workflowPacks.PSObject.Properties | ForEach-Object { $_.Name })
-
-    $installedAt = if ($workflowPackPropertyNames -contains $script:Installer.PackId -and $state.workflowPacks."$($script:Installer.PackId)" -and -not [string]::IsNullOrWhiteSpace("$($state.workflowPacks."$($script:Installer.PackId)".installedAt)")) {
-        "$($state.workflowPacks."$($script:Installer.PackId)".installedAt)"
+    $existingState = if ($workflowPackPropertyNames -contains $script:Installer.PackId) { $state.workflowPacks."$($script:Installer.PackId)" } else { $null }
+    $installedAt = if ($null -ne $existingState -and -not [string]::IsNullOrWhiteSpace("$(Get-ObjectPropertyValue -Object $existingState -Name 'installedAt')")) {
+        "$(Get-ObjectPropertyValue -Object $existingState -Name 'installedAt')"
     } else {
-        (Get-Date).ToString("o")
+        (Get-Date).ToUniversalTime().ToString("o")
     }
 
     $runtime = Get-ObjectPropertyValue -Object $script:Installer.Manifest -Name "runtime"
-    $displayName = "$(Get-ObjectPropertyValue -Object $script:Installer.Manifest -Name "displayName")"
-    $version = "$(Get-ObjectPropertyValue -Object $script:Installer.Manifest -Name "version")"
-    $pluginId = "$(Get-ObjectPropertyValue -Object $script:Installer.Manifest -Name "pluginId")"
+    $displayName = "$(Get-ObjectPropertyValue -Object $script:Installer.Manifest -Name 'displayName')"
+    $version = "$(Get-ObjectPropertyValue -Object $script:Installer.Manifest -Name 'version')"
+    $pluginId = "$(Get-ObjectPropertyValue -Object $script:Installer.Manifest -Name 'pluginId')"
+    $pluginIds = @(Get-WorkflowPackPluginIds)
+    $itemId = Get-WorkflowPackItemId
+    $itemType = Get-WorkflowPackItemType
     $runtimeRoot = if ($script:Installer.RuntimeSourceRoot) {
         $script:Installer.RuntimeRoot
     } else {
         $null
     }
     $runtimeKey = if ($runtime) {
-        "$(Get-ObjectPropertyValue -Object $runtime -Name "key")"
+        "$(Get-ObjectPropertyValue -Object $runtime -Name 'key')"
     } else {
         $null
     }
     $runtimeLayout = if ($runtime) {
-        "$(Get-ObjectPropertyValue -Object $runtime -Name "layout")"
+        "$(Get-ObjectPropertyValue -Object $runtime -Name 'layout')"
     } else {
         $null
     }
     $wrapperPaths = $script:Installer.WrapperPaths.ToArray()
-    $verification = $script:Installer.Verification.ToArray()
+    $verification = @($script:Installer.Verification.ToArray())
+    $readiness = Get-WorkflowPackCurrentReadiness
+    $reportRoot = if ($script:Installer.LastReportInfo -and -not [string]::IsNullOrWhiteSpace("$($script:Installer.LastReportInfo.reportRoot)")) {
+        "$($script:Installer.LastReportInfo.reportRoot)"
+    } elseif ($null -ne $existingState -and -not [string]::IsNullOrWhiteSpace("$(Get-ObjectPropertyValue -Object $existingState -Name 'reportRoot')")) {
+        "$(Get-ObjectPropertyValue -Object $existingState -Name 'reportRoot')"
+    } else {
+        (Join-Path $script:Installer.StoreReportsRoot $itemId)
+    }
+    $latestReportPath = if ($script:Installer.LastReportInfo -and -not [string]::IsNullOrWhiteSpace("$($script:Installer.LastReportInfo.latestPath)")) {
+        "$($script:Installer.LastReportInfo.latestPath)"
+    } else {
+        "$(Get-ObjectPropertyValue -Object $existingState -Name 'latestReportPath')"
+    }
+    $lastReportPath = if ($script:Installer.LastReportInfo -and -not [string]::IsNullOrWhiteSpace("$($script:Installer.LastReportInfo.historyPath)")) {
+        "$($script:Installer.LastReportInfo.historyPath)"
+    } else {
+        "$(Get-ObjectPropertyValue -Object $existingState -Name 'lastReportPath')"
+    }
+    $verifiedAt = if ($script:Installer.LastReportInfo -and -not [string]::IsNullOrWhiteSpace("$($script:Installer.LastReportInfo.generatedAt)")) {
+        "$($script:Installer.LastReportInfo.generatedAt)"
+    } elseif ($null -ne $existingState -and -not [string]::IsNullOrWhiteSpace("$(Get-ObjectPropertyValue -Object $existingState -Name 'verifiedAt')")) {
+        "$(Get-ObjectPropertyValue -Object $existingState -Name 'verifiedAt')"
+    } else {
+        (Get-Date).ToUniversalTime().ToString("o")
+    }
+    $verificationSuccess = Test-WorkflowPackOperationSuccess -Readiness $readiness
+    $verificationSummary = if ([string]::IsNullOrWhiteSpace("$($readiness.summary)")) {
+        "Workflow pack verification did not produce a summary."
+    } else {
+        "$($readiness.summary)"
+    }
 
     $payload = [pscustomobject]@{
-        packId = $script:Installer.PackId
-        displayName = $displayName
-        version = $version
-        pluginId = $pluginId
-        archivePath = $script:Installer.SupportArchivePath
-        manifestPath = $script:Installer.SupportManifestPath
-        buildMetadataPath = $script:Installer.SupportBuildMetadataPath
-        buildMetadataSha256 = Get-FileSha256 -Path $script:Installer.SupportBuildMetadataPath
-        sourceLockPath = $script:Installer.SupportSourceLockPath
-        sourceLockSha256 = Get-FileSha256 -Path $script:Installer.SupportSourceLockPath
-        supportRoot = $script:Installer.SupportRoot
-        runtimeRoot = $runtimeRoot
-        runtimeKey = $runtimeKey
-        runtimeLayout = $runtimeLayout
-        installed = $true
-        installedAt = $installedAt
-        verifiedAt = (Get-Date).ToString("o")
-        wrapperPaths = $wrapperPaths
-        verification = $verification
-        provisioning = @($script:Installer.Provisioning.ToArray())
-        prerequisites = @($script:Installer.Prerequisites.ToArray())
-        readiness = $script:Installer.Readiness
+        packId                 = $script:Installer.PackId
+        itemId                 = $itemId
+        itemType               = $itemType
+        displayName            = $displayName
+        version                = $version
+        pluginId               = $pluginId
+        pluginIds              = @($pluginIds)
+        archivePath            = $script:Installer.SupportArchivePath
+        manifestPath           = $script:Installer.SupportManifestPath
+        buildMetadataPath      = $script:Installer.SupportBuildMetadataPath
+        buildMetadataSha256    = Get-FileSha256 -Path $script:Installer.SupportBuildMetadataPath
+        sourceLockPath         = $script:Installer.SupportSourceLockPath
+        sourceLockSha256       = Get-FileSha256 -Path $script:Installer.SupportSourceLockPath
+        supportRoot            = $script:Installer.SupportRoot
+        reportRoot             = $reportRoot
+        latestReportPath       = $(if ([string]::IsNullOrWhiteSpace($latestReportPath)) { $null } else { $latestReportPath })
+        lastReportPath         = $(if ([string]::IsNullOrWhiteSpace($lastReportPath)) { $null } else { $lastReportPath })
+        runtimeRoot            = $runtimeRoot
+        runtimeKey             = $runtimeKey
+        runtimeLayout          = $runtimeLayout
+        installed              = $true
+        installedAt            = $installedAt
+        verifiedAt             = $verifiedAt
+        wrapperPaths           = $wrapperPaths
+        verification           = $verification
+        provisioning           = @($script:Installer.Provisioning.ToArray())
+        prerequisites          = @($script:Installer.Prerequisites.ToArray())
+        readiness              = $readiness
+        lastReadinessStateId   = $readiness.status
+        lastReadinessState     = $readiness.state
+        lastReadinessSummary   = $readiness.summary
+        lastVerification       = [pscustomobject]@{
+            success       = [bool]$verificationSuccess
+            summary       = $verificationSummary
+            repairAllowed = $false
+            readiness     = $readiness
+            checks        = @($verification)
+        }
+        lastRepair             = [pscustomobject]@{
+            attempted      = $false
+            success        = $true
+            summary        = "Workflow pack install completed without a repair attempt."
+            actions        = @()
+            attemptedAt    = $null
+            archiveMissing = $false
+        }
     }
 
     if ($workflowPackPropertyNames -contains $script:Installer.PackId) {
@@ -1376,42 +1638,82 @@ function Save-WorkflowPackState {
 
 function Write-InstallReport {
     param(
+        [ValidateSet("install", "verify", "repair", "update", "uninstall")]
+        [string]$Action = "install",
         [bool]$Success,
         [string]$Summary,
         [string]$ErrorMessage = $null
     )
 
-    if ([string]::IsNullOrWhiteSpace($ReportPath)) {
-        return
+    $generatedAt = (Get-Date).ToUniversalTime()
+    $generatedAtText = $generatedAt.ToString("o")
+    $reportPaths = New-WorkflowPackReportPaths -GeneratedAt $generatedAt
+    $readiness = if ($null -ne $script:Installer.Readiness) {
+        $script:Installer.Readiness
+    } else {
+        New-WorkflowPackDefaultReadiness -Summary $(if ([string]::IsNullOrWhiteSpace($Summary)) { "Workflow pack installation failed before readiness could be evaluated." } else { $Summary })
+    }
+    $effectiveOpenClawRoot = Get-WorkflowPackEffectiveOpenClawRoot
+    $payload = [ordered]@{
+        schemaVersion = 1
+        itemId        = (Get-WorkflowPackItemId)
+        itemType      = (Get-WorkflowPackItemType)
+        action        = $Action
+        success       = [bool]$Success
+        summary       = $(if ([string]::IsNullOrWhiteSpace($Summary)) { "Workflow pack operation finished without a summary." } else { $Summary })
+        error         = $(if ([string]::IsNullOrWhiteSpace($ErrorMessage)) { $null } else { $ErrorMessage })
+        displayName   = $(Get-ObjectPropertyValue -Object $script:Installer.Manifest -Name "displayName")
+        version       = $(Get-ObjectPropertyValue -Object $script:Installer.Manifest -Name "version")
+        pluginIds     = @(Get-WorkflowPackPluginIds)
+        openClawRoot  = $(if ([string]::IsNullOrWhiteSpace($effectiveOpenClawRoot)) { $null } else { $effectiveOpenClawRoot })
+        supportRoot   = $(if ([string]::IsNullOrWhiteSpace($script:Installer.SupportRoot)) { $null } else { $script:Installer.SupportRoot })
+        runtimeRoot   = $(if ([string]::IsNullOrWhiteSpace($script:Installer.RuntimeRoot)) { $null } else { $script:Installer.RuntimeRoot })
+        verification  = @($script:Installer.Verification.ToArray())
+        provisioning  = @($script:Installer.Provisioning.ToArray())
+        prerequisites = @($script:Installer.Prerequisites.ToArray())
+        readiness     = $readiness
+        generatedAt   = $generatedAtText
+    }
+    if (-not [string]::IsNullOrWhiteSpace("$($reportPaths.reportRoot)")) {
+        $payload["reportPaths"] = [pscustomobject]@{
+            reportRoot  = $reportPaths.reportRoot
+            latestPath  = $reportPaths.latestPath
+            historyPath = $reportPaths.historyPath
+        }
     }
 
-    $payload = [pscustomobject]@{
-        packId = $script:Installer.PackId
-        displayName = $(Get-ObjectPropertyValue -Object $script:Installer.Manifest -Name "displayName")
-        version = $(Get-ObjectPropertyValue -Object $script:Installer.Manifest -Name "version")
-        pluginId = $(Get-ObjectPropertyValue -Object $script:Installer.Manifest -Name "pluginId")
-        success = [bool]$Success
-        summary = $Summary
-        error = $ErrorMessage
-        openClawRoot = $script:Installer.OpenClawRoot
-        supportRoot = $script:Installer.SupportRoot
-        runtimeRoot = $script:Installer.RuntimeRoot
-        verification = @($script:Installer.Verification.ToArray())
-        provisioning = @($script:Installer.Provisioning.ToArray())
-        prerequisites = @($script:Installer.Prerequisites.ToArray())
-        readiness = $script:Installer.Readiness
-        generatedAt = (Get-Date).ToString("o")
+    $script:Installer.LastReportInfo = [pscustomobject]@{
+        generatedAt = $generatedAtText
+        reportRoot  = $reportPaths.reportRoot
+        latestPath  = $reportPaths.latestPath
+        historyPath = $reportPaths.historyPath
+        tempPath    = $(if ([string]::IsNullOrWhiteSpace($ReportPath)) { $null } else { $ReportPath })
     }
 
     if ($script:Installer.DryRun) {
-        Write-Note ("Dry-run write install report: {0}" -f $ReportPath)
+        if (-not [string]::IsNullOrWhiteSpace($ReportPath)) {
+            Write-Note ("Dry-run write install report: {0}" -f $ReportPath)
+        }
+        if (-not [string]::IsNullOrWhiteSpace("$($reportPaths.latestPath)")) {
+            Write-Note ("Dry-run persist latest store report: {0}" -f $reportPaths.latestPath)
+            Write-Note ("Dry-run persist historical store report: {0}" -f $reportPaths.historyPath)
+        }
         return
     }
 
-    Ensure-Directory -Path (Split-Path -Path $ReportPath -Parent)
-    $json = $payload | ConvertTo-Json -Depth 12
-    [System.IO.File]::WriteAllText($ReportPath, $json, (New-Object System.Text.UTF8Encoding($true)))
-    Write-Ok ("Install report written: {0}" -f $ReportPath)
+    $payloadObject = [pscustomobject]$payload
+    if (-not [string]::IsNullOrWhiteSpace("$($reportPaths.reportRoot)")) {
+        Ensure-Directory -Path $reportPaths.reportRoot
+        Save-JsonFile -Path $reportPaths.latestPath -Object $payloadObject
+        Save-JsonFile -Path $reportPaths.historyPath -Object $payloadObject
+        Write-Ok ("Store install report written: {0}" -f $reportPaths.latestPath)
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($ReportPath)) {
+        Ensure-Directory -Path (Split-Path -Path $ReportPath -Parent)
+        Save-JsonFile -Path $ReportPath -Object $payloadObject
+        Write-Ok ("Install report written: {0}" -f $ReportPath)
+    }
 }
 
 function Install-WorkflowPack {
@@ -1425,22 +1727,22 @@ function Install-WorkflowPack {
     Invoke-WorkflowPackProvisioning
     Invoke-WorkflowPackPrerequisites
     Update-WorkflowPackReadiness
-    Save-WorkflowPackState
 }
 
 try {
     Install-WorkflowPack
-    $summary = if ($script:Installer.Readiness -and $script:Installer.Readiness.status -eq "ready") {
-        "Workflow pack installation completed and verification passed."
-    } elseif ($script:Installer.Readiness -and $script:Installer.Readiness.status -eq "warning") {
-        "Workflow pack installation completed, but some manual follow-up may still be required."
-    } else {
-        "Workflow pack installation completed, but the declared readiness state still needs attention."
+    $readiness = Get-WorkflowPackCurrentReadiness
+    $reportSuccess = Test-WorkflowPackOperationSuccess -Readiness $readiness
+    $summary = switch ("$($readiness.status)") {
+        "ready" { "Workflow pack installation completed and verification passed." }
+        "needs-setup" { "Workflow pack installation completed, but one or more manual setup steps are still required." }
+        default { "Workflow pack installation completed, but the package still needs repair before it can be treated as ready." }
     }
-    Write-InstallReport -Success $true -Summary $summary
+    Write-InstallReport -Action "install" -Success $reportSuccess -Summary $summary
+    Save-WorkflowPackState
 } catch {
     try {
-        Write-InstallReport -Success $false -Summary "Workflow pack installation failed." -ErrorMessage $_.Exception.Message
+        Write-InstallReport -Action "install" -Success $false -Summary "Workflow pack installation failed." -ErrorMessage $_.Exception.Message
     } catch {}
     throw
 }

@@ -1,0 +1,341 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openclaw.local/schemas/store-install-report.schema.json",
+  "title": "OpenClaw Store Install Report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "itemId",
+    "itemType",
+    "action",
+    "success",
+    "summary",
+    "verification",
+    "provisioning",
+    "prerequisites",
+    "readiness",
+    "generatedAt"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "itemId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "itemType": {
+      "type": "string",
+      "enum": ["native-plugin", "bundle-plugin", "capability-pack"]
+    },
+    "action": {
+      "type": "string",
+      "enum": ["install", "verify", "repair", "update", "uninstall"]
+    },
+    "success": {
+      "type": "boolean"
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "error": {
+      "type": ["string", "null"]
+    },
+    "displayName": {
+      "type": ["string", "null"]
+    },
+    "version": {
+      "type": ["string", "null"]
+    },
+    "pluginIds": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "openClawRoot": {
+      "type": ["string", "null"]
+    },
+    "supportRoot": {
+      "type": ["string", "null"]
+    },
+    "runtimeRoot": {
+      "type": ["string", "null"]
+    },
+    "reportPaths": {
+      "$ref": "#/$defs/reportPaths"
+    },
+    "verification": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/verificationCheck"
+      }
+    },
+    "provisioning": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/provisioningResult"
+      }
+    },
+    "prerequisites": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/prerequisiteResult"
+      }
+    },
+    "readiness": {
+      "$ref": "#/$defs/readinessState"
+    },
+    "repair": {
+      "$ref": "#/$defs/repairResult"
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "$defs": {
+    "reportPaths": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reportRoot", "latestPath", "historyPath"],
+      "properties": {
+        "reportRoot": {
+          "type": "string",
+          "minLength": 1
+        },
+        "latestPath": {
+          "type": "string",
+          "minLength": 1
+        },
+        "historyPath": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "verificationCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "success", "summary", "category", "severity"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "category": {
+          "type": "string",
+          "minLength": 1
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "warning", "error"]
+        },
+        "exitCode": {
+          "type": ["integer", "null"]
+        },
+        "timedOut": {
+          "type": "boolean"
+        },
+        "repairable": {
+          "type": "boolean"
+        },
+        "arguments": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "provisioningResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "success", "summary"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "type": ["string", "null"]
+        },
+        "source": {
+          "type": ["string", "null"]
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "prerequisiteResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "severity", "success", "manual", "summary"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "warning", "error"]
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "manual": {
+          "type": "boolean"
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "message": {
+          "type": ["string", "null"]
+        },
+        "command": {
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "readinessState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "state", "summary"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["ready", "needs-setup", "needs-repair"]
+        },
+        "state": {
+          "type": "string",
+          "enum": ["Ready", "Needs Setup", "Needs Repair"]
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "unresolvedRequiredSkills": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/namedSummary"
+          }
+        },
+        "integrityIssues": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/namedSummary"
+          }
+        },
+        "provisioningFailures": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/pathSummary"
+          }
+        },
+        "blockingPrerequisites": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/prerequisiteResult"
+          }
+        },
+        "warningPrerequisites": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/prerequisiteResult"
+          }
+        }
+      }
+    },
+    "repairResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["attempted", "success", "summary", "actions", "archiveMissing"],
+      "properties": {
+        "attempted": {
+          "type": "boolean"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/verificationCheck"
+          }
+        },
+        "attemptedAt": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "archiveMissing": {
+          "type": "boolean"
+        }
+      }
+    },
+    "namedSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary"],
+      "properties": {
+        "name": {
+          "type": ["string", "null"]
+        },
+        "skillId": {
+          "type": ["string", "null"]
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "pathSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary", "success"],
+      "properties": {
+        "type": {
+          "type": ["string", "null"]
+        },
+        "path": {
+          "type": ["string", "null"]
+        },
+        "source": {
+          "type": ["string", "null"]
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

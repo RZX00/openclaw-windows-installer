@@ -30,6 +30,8 @@ $script:Context = [ordered]@{
     DataRoot     = $initialInstallRoot
     SupportRoot  = Join-Path $initialInstallRoot "support"
     WrapperDir   = Join-Path $initialInstallRoot "bin"
+    ReportsRoot  = Join-Path $initialInstallRoot "reports"
+    StoreReportsRoot = Join-Path (Join-Path $initialInstallRoot "reports") "store"
     StatePath    = Join-Path $initialInstallRoot "install-state.json"
     LogPath      = $LogPath
     InvokerPath  = $InvokerPath
@@ -195,6 +197,8 @@ function Set-InstallContextRoot {
     $script:Context.DataRoot = $normalizedRoot
     $script:Context.SupportRoot = Join-Path $normalizedRoot "support"
     $script:Context.WrapperDir = Join-Path $normalizedRoot "bin"
+    $script:Context.ReportsRoot = Join-Path $normalizedRoot "reports"
+    $script:Context.StoreReportsRoot = Join-Path $script:Context.ReportsRoot "store"
     $script:Context.StatePath = Join-Path $normalizedRoot "install-state.json"
 }
 
@@ -613,7 +617,7 @@ function Save-JsonFile {
         [object]$Object
     )
 
-    $json = $Object | ConvertTo-Json -Depth 8
+    $json = $Object | ConvertTo-Json -Depth 16
     [System.IO.File]::WriteAllText($Path, $json, (New-Object System.Text.UTF8Encoding($true)))
 }
 
@@ -1047,6 +1051,8 @@ function Get-DefaultInstallState {
         bundleRoot                = Join-Path $script:Context.DataRoot "bundles"
         sourceRoot                = Join-Path $script:Context.DataRoot "source"
         toolRoot                  = Join-Path $script:Context.DataRoot "tools"
+        reportsRoot               = $script:Context.ReportsRoot
+        storeReportsRoot          = $script:Context.StoreReportsRoot
         wrapperDir                = $script:Context.WrapperDir
         wrapperPath               = Join-Path $script:Context.WrapperDir "openclaw.cmd"
         supportDir                = $script:Context.SupportRoot
@@ -1107,6 +1113,12 @@ function Resolve-InstallState {
     }
     if ([string]::IsNullOrWhiteSpace("$($state.toolRoot)")) {
         $state.toolRoot = Join-Path $state.dataRoot "tools"
+    }
+    if ([string]::IsNullOrWhiteSpace("$($state.reportsRoot)")) {
+        $state.reportsRoot = Join-Path $state.dataRoot "reports"
+    }
+    if ([string]::IsNullOrWhiteSpace("$($state.storeReportsRoot)")) {
+        $state.storeReportsRoot = Join-Path $state.reportsRoot "store"
     }
 
     if ([string]::IsNullOrWhiteSpace("$($state.wrapperDir)")) {
@@ -1236,6 +1248,14 @@ function Persist-InstallState {
     $payload.bundleRoot = Get-StateProperty -State $state -Name "bundleRoot" -Default (Join-Path $payload.dataRoot "bundles")
     $payload.sourceRoot = Get-StateProperty -State $state -Name "sourceRoot" -Default (Join-Path $payload.dataRoot "source")
     $payload.toolRoot = Get-StateProperty -State $state -Name "toolRoot" -Default (Join-Path $payload.dataRoot "tools")
+    $payload.reportsRoot = Get-StateProperty -State $state -Name "reportsRoot" -Default $script:Context.ReportsRoot
+    if ([string]::IsNullOrWhiteSpace("$($payload.reportsRoot)")) {
+        $payload.reportsRoot = Join-Path $payload.dataRoot "reports"
+    }
+    $payload.storeReportsRoot = Get-StateProperty -State $state -Name "storeReportsRoot" -Default $script:Context.StoreReportsRoot
+    if ([string]::IsNullOrWhiteSpace("$($payload.storeReportsRoot)")) {
+        $payload.storeReportsRoot = Join-Path $payload.reportsRoot "store"
+    }
     $payload.wrapperPath = Join-Path (Get-StateProperty -State $state -Name "wrapperDir" -Default $script:Context.WrapperDir) "openclaw.cmd"
     $payload.supportDir = Get-StateProperty -State $state -Name "supportDir" -Default $script:Context.SupportRoot
     $payload.coreInstallerPath = Get-StateProperty -State $state -Name "coreInstallerPath" -Default (Join-Path $payload.supportDir "install-windows-core.ps1")
@@ -1428,6 +1448,115 @@ function Test-WorkflowPackRequiresLockedMetadata {
     )
 }
 
+function Get-WorkflowPackCatalogConfig {
+    param([object]$WorkflowPack)
+
+    return (Get-StateProperty -State $WorkflowPack.Manifest -Name "catalog")
+}
+
+function Get-WorkflowPackItemId {
+    param([object]$WorkflowPack)
+
+    $itemId = "$(Get-StateProperty -State $WorkflowPack.ExistingState -Name 'itemId')"
+    if ([string]::IsNullOrWhiteSpace($itemId)) {
+        $itemId = "$($WorkflowPack.PackId)"
+    }
+
+    return $itemId
+}
+
+function Get-WorkflowPackItemType {
+    param([object]$WorkflowPack)
+
+    $catalog = Get-WorkflowPackCatalogConfig -WorkflowPack $WorkflowPack
+    $itemType = "$(Get-StateProperty -State $catalog -Name 'itemType')"
+    if ([string]::IsNullOrWhiteSpace($itemType)) {
+        $itemType = "$(Get-StateProperty -State $WorkflowPack.ExistingState -Name 'itemType')"
+    }
+    if ([string]::IsNullOrWhiteSpace($itemType)) {
+        $itemType = "capability-pack"
+    }
+
+    return $itemType
+}
+
+function Get-WorkflowPackPluginIds {
+    param([object]$WorkflowPack)
+
+    $pluginIds = New-Object System.Collections.Generic.List[string]
+    foreach ($candidate in @(Convert-ToArray -Value (Get-StateProperty -State $WorkflowPack.ExistingState -Name "pluginIds"))) {
+        Add-UniqueString -List $pluginIds -Value "$candidate"
+    }
+    foreach ($candidate in @(Convert-ToArray -Value (Get-StateProperty -State $WorkflowPack.Manifest -Name "pluginIds"))) {
+        Add-UniqueString -List $pluginIds -Value "$candidate"
+    }
+
+    Add-UniqueString -List $pluginIds -Value "$(Get-StateProperty -State $WorkflowPack.ExistingState -Name 'pluginId')"
+    Add-UniqueString -List $pluginIds -Value "$($WorkflowPack.PluginId)"
+    return @($pluginIds.ToArray())
+}
+
+function Get-WorkflowPackReadinessLabel {
+    param([string]$Status)
+
+    switch ("$Status") {
+        "ready" { return "Ready" }
+        "needs-setup" { return "Needs Setup" }
+        default { return "Needs Repair" }
+    }
+}
+
+function New-DefaultWorkflowPackReadiness {
+    param([string]$Summary = "Workflow pack verification did not complete.")
+
+    return [pscustomobject]@{
+        status                   = "needs-repair"
+        state                    = "Needs Repair"
+        summary                  = $Summary
+        unresolvedRequiredSkills = @()
+        integrityIssues          = @()
+        provisioningFailures     = @()
+        blockingPrerequisites    = @()
+        warningPrerequisites     = @()
+    }
+}
+
+function Test-WorkflowPackOperationSuccess {
+    param([object]$Readiness)
+
+    if ($null -eq $Readiness) {
+        return $false
+    }
+
+    return ("$($Readiness.status)" -ne "needs-repair")
+}
+
+function Get-WorkflowPackReportRoot {
+    param([object]$WorkflowPack)
+
+    $existingReportRoot = "$(Get-StateProperty -State $WorkflowPack.ExistingState -Name 'reportRoot')"
+    if (-not [string]::IsNullOrWhiteSpace($existingReportRoot)) {
+        return $existingReportRoot
+    }
+
+    return (Join-Path $script:Context.StoreReportsRoot (Get-WorkflowPackItemId -WorkflowPack $WorkflowPack))
+}
+
+function New-WorkflowPackReportPaths {
+    param(
+        [object]$WorkflowPack,
+        [datetime]$GeneratedAt = ([datetime]::UtcNow)
+    )
+
+    $reportRoot = Get-WorkflowPackReportRoot -WorkflowPack $WorkflowPack
+    $timestamp = $GeneratedAt.ToUniversalTime().ToString("yyyyMMddTHHmmssZ")
+    return [pscustomobject]@{
+        reportRoot  = $reportRoot
+        latestPath  = $(if ([string]::IsNullOrWhiteSpace($reportRoot)) { $null } else { Join-Path $reportRoot "latest.json" })
+        historyPath = $(if ([string]::IsNullOrWhiteSpace($reportRoot)) { $null } else { Join-Path $reportRoot ($timestamp + ".json") })
+    }
+}
+
 function New-WorkflowPackCheckResult {
     param(
         [string]$Name,
@@ -1442,6 +1571,7 @@ function New-WorkflowPackCheckResult {
 
     return [pscustomobject]@{
         name       = $Name
+        success    = (($ExitCode -eq 0) -and (-not $TimedOut))
         exitCode   = $ExitCode
         timedOut   = [bool]$TimedOut
         summary    = $Summary
@@ -1553,12 +1683,15 @@ function Invoke-WorkflowPackPrerequisiteVerification {
         $ruleType = "$(Get-StateProperty -State $rule -Name 'type')"
         $severity = "$(Get-StateProperty -State $rule -Name 'severity' -Default 'warning')"
         $message = "$(Get-StateProperty -State $rule -Name 'message')"
+        $commandName = $null
         $success = $false
         $summary = $message
+        $manual = [bool](Get-StateProperty -State $rule -Name 'manual' -Default ($ruleType -eq 'manual-step'))
 
         switch ($ruleType) {
             "command-available" {
-                $success = Test-WorkflowPackCommandAvailable -CommandName "$(Get-StateProperty -State $rule -Name 'command')"
+                $commandName = "$(Get-StateProperty -State $rule -Name 'command')"
+                $success = Test-WorkflowPackCommandAvailable -CommandName $commandName
                 $summary = if ($success) { "Command is available." } else { $message }
             }
             "path-exists" {
@@ -1567,6 +1700,7 @@ function Invoke-WorkflowPackPrerequisiteVerification {
                 $summary = if ($success) { "Path exists." } else { $message }
             }
             "manual-step" {
+                $manual = $true
                 $success = $false
                 $summary = $message
             }
@@ -1581,7 +1715,10 @@ function Invoke-WorkflowPackPrerequisiteVerification {
             type     = $ruleType
             severity = $severity
             success  = [bool]$success
+            manual   = [bool]$manual
             summary  = $summary
+            message  = $(if ([string]::IsNullOrWhiteSpace($message)) { $null } else { $message })
+            command  = $(if ([string]::IsNullOrWhiteSpace($commandName)) { $null } else { $commandName })
         }) | Out-Null
     }
 
@@ -1596,28 +1733,38 @@ function Get-WorkflowPackReadinessState {
         [object[]]$IntegrityIssues
     )
 
-    $blockingPrereqs = @(@($PrerequisiteResults) | Where-Object { -not $_.success -and $_.severity -eq "error" })
-    $warningPrereqs = @(@($PrerequisiteResults) | Where-Object { -not $_.success -and $_.severity -ne "error" })
+    $failedPrerequisites = @(@($PrerequisiteResults) | Where-Object { -not $_.success })
+    $blockingPrereqs = @($failedPrerequisites | Where-Object { $_.severity -eq "error" })
+    $warningPrereqs = @($failedPrerequisites | Where-Object { $_.severity -ne "error" })
+    $manualOutstanding = @($failedPrerequisites | Where-Object { $_.manual })
+    $automatedFailures = @($failedPrerequisites | Where-Object { -not $_.manual })
     $provisioningFailures = @(@($ProvisioningResults) | Where-Object { -not $_.success })
     $integrityItems = @($IntegrityIssues)
     $requiredSourceItems = @($RequiredSourceFailures)
 
-    $status = if ($requiredSourceItems.Count -gt 0 -or $provisioningFailures.Count -gt 0 -or $blockingPrereqs.Count -gt 0 -or $integrityItems.Count -gt 0) {
-        "needs-attention"
-    } elseif ($warningPrereqs.Count -gt 0) {
-        "warning"
+    $status = if ($requiredSourceItems.Count -gt 0 -or $provisioningFailures.Count -gt 0 -or $automatedFailures.Count -gt 0 -or $integrityItems.Count -gt 0) {
+        "needs-repair"
+    } elseif ($manualOutstanding.Count -gt 0) {
+        "needs-setup"
     } else {
         "ready"
     }
 
+    $summary = switch ($status) {
+        "ready" { "Workflow pack verification is healthy." }
+        "needs-setup" { "Workflow pack payload is present, but one or more manual setup steps are still required." }
+        default { "Workflow pack verification found drift or missing assets that need repair." }
+    }
+
     return [pscustomobject]@{
-        status = $status
-        summary = $(if ($status -eq "ready") { "Workflow pack verification is healthy." } elseif ($status -eq "warning") { "Workflow pack is installed, but some manual follow-up may still be required." } else { "Workflow pack verification found blocking issues that need manual attention." })
+        status                   = $status
+        state                    = (Get-WorkflowPackReadinessLabel -Status $status)
+        summary                  = $summary
         unresolvedRequiredSkills = @($requiredSourceItems)
-        integrityIssues = @($integrityItems)
-        provisioningFailures = @($provisioningFailures)
-        blockingPrerequisites = @($blockingPrereqs)
-        warningPrerequisites = @($warningPrereqs)
+        integrityIssues          = @($integrityItems)
+        provisioningFailures     = @($provisioningFailures)
+        blockingPrerequisites    = @($blockingPrereqs)
+        warningPrerequisites     = @($warningPrereqs)
     }
 }
 
@@ -1868,23 +2015,15 @@ function Invoke-WorkflowPackVerification {
 
     if ([string]::IsNullOrWhiteSpace("$($WorkflowPack.PluginId)")) {
         return [pscustomobject]@{
-            Success = $false
-            Summary = "Workflow pack plugin id is missing."
-            RepairAllowed = $false
-            Readiness = [pscustomobject]@{
-                status = "needs-attention"
-                summary = "Workflow pack plugin id is missing."
-                unresolvedRequiredSkills = @()
-                integrityIssues = @()
-                provisioningFailures = @()
-                blockingPrerequisites = @()
-                warningPrerequisites = @()
-            }
-            Provisioning = @()
-            Prerequisites = @()
+            Success                     = $false
+            Summary                     = "Workflow pack plugin id is missing."
+            RepairAllowed               = $false
+            Readiness                   = (New-DefaultWorkflowPackReadiness -Summary "Workflow pack plugin id is missing.")
+            Provisioning                = @()
+            Prerequisites               = @()
             ObservedBuildMetadataSha256 = $null
-            ObservedSourceLockSha256 = $null
-            Checks  = @(
+            ObservedSourceLockSha256    = $null
+            Checks                      = @(
                 (New-WorkflowPackCheckResult -Name "plugin id" -Summary "Workflow pack plugin id is missing." -ExitCode 1 -Category "metadata" -Severity "error")
             )
         }
@@ -1899,10 +2038,12 @@ function Invoke-WorkflowPackVerification {
         $checks.Add($result) | Out-Null
     }
     foreach ($provisioning in @($provisioningResults)) {
-        $checks.Add((New-WorkflowPackCheckResult -Name ("Provisioning: {0}" -f $provisioning.type) -Summary $provisioning.summary -ExitCode $(if ($provisioning.success) { 0 } else { 1 }) -Category "provisioning" -Severity "error")) | Out-Null
+        $checks.Add((New-WorkflowPackCheckResult -Name ("Provisioning: {0}" -f $provisioning.type) -Summary $provisioning.summary -ExitCode $(if ($provisioning.success) { 0 } else { 1 }) -Category "provisioning" -Severity $(if ($provisioning.success) { "info" } else { "error" }))) | Out-Null
     }
     foreach ($prerequisite in @($prerequisiteResults)) {
-        $checks.Add((New-WorkflowPackCheckResult -Name ("Prerequisite: {0}" -f $prerequisite.id) -Summary $prerequisite.summary -ExitCode $(if ($prerequisite.success -or $prerequisite.severity -ne "error") { 0 } else { 1 }) -Category "readiness" -Severity $prerequisite.severity)) | Out-Null
+        $prerequisiteExitCode = if ($prerequisite.success -or $prerequisite.manual -or $prerequisite.severity -ne "error") { 0 } else { 1 }
+        $prerequisiteSeverity = if ($prerequisite.success) { "info" } elseif ($prerequisite.manual) { "warning" } else { $prerequisite.severity }
+        $checks.Add((New-WorkflowPackCheckResult -Name ("Prerequisite: {0}" -f $prerequisite.id) -Summary $prerequisite.summary -ExitCode $prerequisiteExitCode -Category "prerequisite" -Severity $prerequisiteSeverity)) | Out-Null
     }
 
     foreach ($check in @(
@@ -1911,15 +2052,15 @@ function Invoke-WorkflowPackVerification {
         [pscustomobject]@{ Name = "Skills check"; Arguments = @("skills", "check"); TimeoutSeconds = 120 }
     )) {
         $result = Invoke-OpenClaw -Arguments $check.Arguments -TimeoutSeconds $check.TimeoutSeconds
-        $checks.Add((New-WorkflowPackCheckResult -Name $check.Name -Summary (Get-CommandResultSummary -Result $result) -ExitCode $result.ExitCode -TimedOut ([bool]$result.TimedOut) -Arguments @($check.Arguments) -Category "plugin-health" -Severity "error" -Repairable $true)) | Out-Null
+        $checks.Add((New-WorkflowPackCheckResult -Name $check.Name -Summary (Get-CommandResultSummary -Result $result) -ExitCode $result.ExitCode -TimedOut ([bool]$result.TimedOut) -Arguments @($check.Arguments) -Category "plugin-health" -Severity $(if ($result.TimedOut -or $result.ExitCode -ne 0) { "error" } else { "info" }) -Repairable $true)) | Out-Null
     }
 
     $integrityIssues = @(
-        @($buildMetadataVerification.Checks + $sourceLockVerification.Checks) |
-            Where-Object { $_.timedOut -or $_.exitCode -ne 0 } |
+        @($checks.ToArray()) |
+            Where-Object { -not $_.success -and $_.category -notin @("provisioning", "prerequisite") } |
             ForEach-Object {
                 [pscustomobject]@{
-                    name = $_.name
+                    name    = $_.name
                     summary = $_.summary
                 }
             }
@@ -1930,24 +2071,25 @@ function Invoke-WorkflowPackVerification {
         -PrerequisiteResults @($prerequisiteResults) `
         -IntegrityIssues @($integrityIssues)
 
-    $failedChecks = @($checks | Where-Object { $_.timedOut -or $_.exitCode -ne 0 })
+    $failedChecks = @(@($checks.ToArray()) | Where-Object { -not $_.success })
     $repairBlockedChecks = @($failedChecks | Where-Object { -not $_.repairable })
+    $operationSuccess = Test-WorkflowPackOperationSuccess -Readiness $readiness
     $summary = if ($failedChecks.Count -gt 0) {
         "$($failedChecks[0].name): $($failedChecks[0].summary)"
-    } elseif ($readiness.status -eq "warning") {
+    } elseif ($readiness.status -eq "needs-setup") {
         $readiness.summary
     } else {
         "Workflow pack verification passed."
     }
 
     return [pscustomobject]@{
-        Success                    = ($failedChecks.Count -eq 0)
-        Summary                    = $summary
-        RepairAllowed              = ($failedChecks.Count -gt 0 -and $repairBlockedChecks.Count -eq 0)
-        Checks                     = $checks.ToArray()
-        Provisioning               = @($provisioningResults)
-        Prerequisites              = @($prerequisiteResults)
-        Readiness                  = $readiness
+        Success                     = [bool]$operationSuccess
+        Summary                     = $summary
+        RepairAllowed               = (-not $operationSuccess -and $failedChecks.Count -gt 0 -and $repairBlockedChecks.Count -eq 0)
+        Checks                      = $checks.ToArray()
+        Provisioning                = @($provisioningResults)
+        Prerequisites               = @($prerequisiteResults)
+        Readiness                   = $readiness
         ObservedBuildMetadataSha256 = $buildMetadataVerification.ObservedSha256
         ObservedSourceLockSha256    = $sourceLockVerification.ObservedSha256
     }
@@ -1958,11 +2100,11 @@ function Invoke-WorkflowPackSelfHeal {
 
     if ([string]::IsNullOrWhiteSpace("$($WorkflowPack.ArchivePath)") -or -not (Test-Path -LiteralPath "$($WorkflowPack.ArchivePath)")) {
         return [pscustomobject]@{
-            Attempted    = $false
-            Success      = $false
-            Summary      = "Workflow pack support archive is missing."
-            Actions      = @()
-            AttemptedAt  = $null
+            Attempted      = $false
+            Success        = $false
+            Summary        = "Workflow pack support archive is missing."
+            Actions        = @()
+            AttemptedAt    = $null
             ArchiveMissing = $true
         }
     }
@@ -1971,7 +2113,7 @@ function Invoke-WorkflowPackSelfHeal {
     Write-Log -Level "WARN" -Message ("Workflow pack '{0}' failed verification. Reinstalling from support archive: {1}" -f $WorkflowPack.PackId, $WorkflowPack.ArchivePath)
 
     $actions = New-Object System.Collections.Generic.List[object]
-    $attemptedAt = (Get-Date).ToString("o")
+    $attemptedAt = (Get-Date).ToUniversalTime().ToString("o")
     foreach ($action in @(
         [pscustomobject]@{ Name = "Install plugin pack"; Arguments = @("plugins", "install", "$($WorkflowPack.ArchivePath)"); TimeoutSeconds = 180; Enabled = $true },
         [pscustomobject]@{ Name = "Enable plugin pack"; Arguments = @("plugins", "enable", "$($WorkflowPack.PluginId)"); TimeoutSeconds = 45; Enabled = (-not [string]::IsNullOrWhiteSpace("$($WorkflowPack.PluginId)")) }
@@ -1981,16 +2123,10 @@ function Invoke-WorkflowPackSelfHeal {
         }
 
         $result = Invoke-OpenClaw -Arguments $action.Arguments -TimeoutSeconds $action.TimeoutSeconds
-        $actions.Add([pscustomobject]@{
-            name      = $action.Name
-            exitCode  = $result.ExitCode
-            timedOut  = [bool]$result.TimedOut
-            summary   = Get-CommandResultSummary -Result $result
-            arguments = @($action.Arguments)
-        }) | Out-Null
+        $actions.Add((New-WorkflowPackCheckResult -Name $action.Name -Summary (Get-CommandResultSummary -Result $result) -ExitCode $result.ExitCode -TimedOut ([bool]$result.TimedOut) -Arguments @($action.Arguments) -Category "repair" -Severity $(if ($result.TimedOut -or $result.ExitCode -ne 0) { "error" } else { "info" }))) | Out-Null
     }
 
-    $failedActions = @($actions | Where-Object { $_.timedOut -or $_.exitCode -ne 0 })
+    $failedActions = @(@($actions.ToArray()) | Where-Object { -not $_.success })
     return [pscustomobject]@{
         Attempted      = $true
         Success        = ($failedActions.Count -eq 0)
@@ -2001,11 +2137,82 @@ function Invoke-WorkflowPackSelfHeal {
     }
 }
 
+function Write-WorkflowPackStoreReport {
+    param(
+        [object]$WorkflowPack,
+        [object]$Verification,
+        [object]$Repair,
+        [ValidateSet("install", "verify", "repair", "update", "uninstall")]
+        [string]$Action = "verify",
+        [string]$ErrorMessage = $null
+    )
+
+    $generatedAt = (Get-Date).ToUniversalTime()
+    $generatedAtText = $generatedAt.ToString("o")
+    $reportPaths = New-WorkflowPackReportPaths -WorkflowPack $WorkflowPack -GeneratedAt $generatedAt
+    $readiness = if ($null -ne $Verification -and $null -ne $Verification.Readiness) {
+        $Verification.Readiness
+    } else {
+        New-DefaultWorkflowPackReadiness -Summary "Workflow pack verification did not produce a readiness result."
+    }
+    $summary = if ($null -ne $Verification -and -not [string]::IsNullOrWhiteSpace("$($Verification.Summary)")) {
+        "$($Verification.Summary)"
+    } else {
+        "$($readiness.summary)"
+    }
+    $success = Test-WorkflowPackOperationSuccess -Readiness $readiness
+    $payload = [pscustomobject]@{
+        schemaVersion = 1
+        itemId        = Get-WorkflowPackItemId -WorkflowPack $WorkflowPack
+        itemType      = Get-WorkflowPackItemType -WorkflowPack $WorkflowPack
+        action        = $Action
+        success       = [bool]$success
+        summary       = $summary
+        error         = $(if ([string]::IsNullOrWhiteSpace($ErrorMessage)) { $null } else { $ErrorMessage })
+        displayName   = $WorkflowPack.DisplayName
+        version       = $WorkflowPack.Version
+        pluginIds     = @(Get-WorkflowPackPluginIds -WorkflowPack $WorkflowPack)
+        openClawRoot  = $script:Context.DataRoot
+        supportRoot   = $(if ([string]::IsNullOrWhiteSpace("$($WorkflowPack.SupportRoot)")) { $null } else { $WorkflowPack.SupportRoot })
+        runtimeRoot   = $(if ([string]::IsNullOrWhiteSpace("$($WorkflowPack.RuntimeRoot)")) { $null } else { $WorkflowPack.RuntimeRoot })
+        reportPaths   = [pscustomobject]@{
+            reportRoot  = $reportPaths.reportRoot
+            latestPath  = $reportPaths.latestPath
+            historyPath = $reportPaths.historyPath
+        }
+        verification  = @($Verification.Checks)
+        provisioning  = @($Verification.Provisioning)
+        prerequisites = @($Verification.Prerequisites)
+        readiness     = $readiness
+        repair        = [pscustomobject]@{
+            attempted      = [bool]$Repair.Attempted
+            success        = [bool]$Repair.Success
+            summary        = $Repair.Summary
+            actions        = @($Repair.Actions)
+            attemptedAt    = $Repair.AttemptedAt
+            archiveMissing = [bool]$Repair.ArchiveMissing
+        }
+        generatedAt   = $generatedAtText
+    }
+
+    Ensure-Directory -Path $reportPaths.reportRoot
+    Save-JsonFile -Path $reportPaths.latestPath -Object $payload
+    Save-JsonFile -Path $reportPaths.historyPath -Object $payload
+
+    return [pscustomobject]@{
+        generatedAt = $generatedAtText
+        reportRoot  = $reportPaths.reportRoot
+        latestPath  = $reportPaths.latestPath
+        historyPath = $reportPaths.historyPath
+    }
+}
+
 function New-WorkflowPackStateSnapshot {
     param(
         [object]$WorkflowPack,
         [object]$Verification,
-        [object]$Repair
+        [object]$Repair,
+        [object]$ReportInfo = $null
     )
 
     $payload = Convert-StateLikeToOrderedMap -InputObject $WorkflowPack.ExistingState
@@ -2013,13 +2220,42 @@ function New-WorkflowPackStateSnapshot {
     $installedAt = if (-not [string]::IsNullOrWhiteSpace("$existingInstalledAt")) {
         "$existingInstalledAt"
     } else {
-        (Get-Date).ToString("o")
+        (Get-Date).ToUniversalTime().ToString("o")
     }
+    $readiness = if ($null -ne $Verification -and $null -ne $Verification.Readiness) {
+        $Verification.Readiness
+    } else {
+        New-DefaultWorkflowPackReadiness -Summary "Workflow pack verification did not complete."
+    }
+    $reportRoot = if ($null -ne $ReportInfo -and -not [string]::IsNullOrWhiteSpace("$($ReportInfo.reportRoot)")) {
+        "$($ReportInfo.reportRoot)"
+    } else {
+        Get-WorkflowPackReportRoot -WorkflowPack $WorkflowPack
+    }
+    $latestReportPath = if ($null -ne $ReportInfo -and -not [string]::IsNullOrWhiteSpace("$($ReportInfo.latestPath)")) {
+        "$($ReportInfo.latestPath)"
+    } else {
+        "$(Get-StateProperty -State $WorkflowPack.ExistingState -Name 'latestReportPath')"
+    }
+    $lastReportPath = if ($null -ne $ReportInfo -and -not [string]::IsNullOrWhiteSpace("$($ReportInfo.historyPath)")) {
+        "$($ReportInfo.historyPath)"
+    } else {
+        "$(Get-StateProperty -State $WorkflowPack.ExistingState -Name 'lastReportPath')"
+    }
+    $verifiedAt = if ($null -ne $ReportInfo -and -not [string]::IsNullOrWhiteSpace("$($ReportInfo.generatedAt)")) {
+        "$($ReportInfo.generatedAt)"
+    } else {
+        (Get-Date).ToUniversalTime().ToString("o")
+    }
+    $operationSuccess = Test-WorkflowPackOperationSuccess -Readiness $readiness
 
     $payload.packId = $WorkflowPack.PackId
+    $payload.itemId = (Get-WorkflowPackItemId -WorkflowPack $WorkflowPack)
+    $payload.itemType = (Get-WorkflowPackItemType -WorkflowPack $WorkflowPack)
     $payload.displayName = $WorkflowPack.DisplayName
     $payload.version = $WorkflowPack.Version
     $payload.pluginId = $WorkflowPack.PluginId
+    $payload.pluginIds = @(Get-WorkflowPackPluginIds -WorkflowPack $WorkflowPack)
     $payload.archivePath = $WorkflowPack.ArchivePath
     $payload.manifestPath = $WorkflowPack.ManifestPath
     $payload.buildMetadataPath = $WorkflowPack.BuildMetadataPath
@@ -2029,20 +2265,26 @@ function New-WorkflowPackStateSnapshot {
     $payload.sourceLockSha256 = $(if (-not [string]::IsNullOrWhiteSpace("$($WorkflowPack.SavedSourceLockSha256)")) { "$($WorkflowPack.SavedSourceLockSha256)" } else { $Verification.ObservedSourceLockSha256 })
     $payload.lastObservedSourceLockSha256 = $Verification.ObservedSourceLockSha256
     $payload.supportRoot = $WorkflowPack.SupportRoot
+    $payload.reportRoot = $reportRoot
+    $payload.latestReportPath = $(if ([string]::IsNullOrWhiteSpace($latestReportPath)) { $null } else { $latestReportPath })
+    $payload.lastReportPath = $(if ([string]::IsNullOrWhiteSpace($lastReportPath)) { $null } else { $lastReportPath })
     $payload.runtimeRoot = $WorkflowPack.RuntimeRoot
-    $payload.installed = [bool]$Verification.Success
+    $payload.installed = $true
     $payload.installedAt = $installedAt
-    $payload.verifiedAt = (Get-Date).ToString("o")
+    $payload.verifiedAt = $verifiedAt
     $payload.verification = @($Verification.Checks)
     $payload.provisioning = @($Verification.Provisioning)
     $payload.prerequisites = @($Verification.Prerequisites)
-    $payload.readiness = $Verification.Readiness
+    $payload.readiness = $readiness
+    $payload.lastReadinessStateId = $readiness.status
+    $payload.lastReadinessState = $readiness.state
+    $payload.lastReadinessSummary = $readiness.summary
     $payload.lastVerification = [pscustomobject]@{
-        success = [bool]$Verification.Success
-        summary = $Verification.Summary
+        success       = [bool]$operationSuccess
+        summary       = $Verification.Summary
         repairAllowed = [bool]$Verification.RepairAllowed
-        readiness = $Verification.Readiness
-        checks  = @($Verification.Checks)
+        readiness     = $readiness
+        checks        = @($Verification.Checks)
     }
     $payload.lastRepair = [pscustomobject]@{
         attempted      = [bool]$Repair.Attempted
@@ -2113,7 +2355,8 @@ function Invoke-WorkflowPackMaintenance {
             $repairedCount += 1
         }
 
-        $packState = New-WorkflowPackStateSnapshot -WorkflowPack $workflowPack -Verification $finalVerification -Repair $repair
+        $reportInfo = Write-WorkflowPackStoreReport -WorkflowPack $workflowPack -Verification $finalVerification -Repair $repair -Action $(if ($repair.Attempted) { "repair" } else { "verify" })
+        $packState = New-WorkflowPackStateSnapshot -WorkflowPack $workflowPack -Verification $finalVerification -Repair $repair -ReportInfo $reportInfo
         $persistedMap[$workflowPack.PackId] = $packState
 
         if (-not $finalVerification.Success) {
