@@ -432,6 +432,142 @@ function Get-CapabilityPresetForRuntimeVersion {
     return $preset
 }
 
+
+function Get-EmbeddedJsonCandidate {
+    param([string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return $null
+    }
+
+    :candidateLoop for ($start = 0; $start -lt $Text.Length; $start++) {
+        $opening = $Text[$start]
+        if ($opening -ne '{' -and $opening -ne '[') {
+            continue
+        }
+
+        $stack = New-Object System.Collections.Generic.Stack[string]
+        $stack.Push([string]$opening)
+        $inString = $false
+        $escaping = $false
+
+        for ($index = $start + 1; $index -lt $Text.Length; $index++) {
+            $current = $Text[$index]
+
+            if ($inString) {
+                if ($escaping) {
+                    $escaping = $false
+                    continue
+                }
+
+                if ($current -eq '\') {
+                    $escaping = $true
+                    continue
+                }
+
+                if ($current -eq '"') {
+                    $inString = $false
+                }
+
+                continue
+            }
+
+            if ($current -eq '"') {
+                $inString = $true
+                continue
+            }
+
+            if ($current -eq '{' -or $current -eq '[') {
+                $stack.Push([string]$current)
+                continue
+            }
+
+            if ($current -eq '}') {
+                if ($stack.Count -eq 0 -or $stack.Peek() -ne '{') {
+                    continue candidateLoop
+                }
+
+                [void]$stack.Pop()
+                if ($stack.Count -eq 0) {
+                    return $Text.Substring($start, ($index - $start + 1)).Trim()
+                }
+
+                continue
+            }
+
+            if ($current -eq ']') {
+                if ($stack.Count -eq 0 -or $stack.Peek() -ne '[') {
+                    continue candidateLoop
+                }
+
+                [void]$stack.Pop()
+                if ($stack.Count -eq 0) {
+                    return $Text.Substring($start, ($index - $start + 1)).Trim()
+                }
+            }
+        }
+    }
+
+    return $null
+}
+
+# CLI JSON commands may emit plugin logs before the payload; recover the first valid JSON block.
+function Convert-MixedOutputToJson {
+    param(
+        [AllowNull()]
+        [string]$Text,
+        [switch]$AllowScalar
+    )
+
+    $trimmed = "$Text"
+    if ([string]::IsNullOrWhiteSpace($trimmed)) {
+        return $null
+    }
+
+    $trimmed = $trimmed.Trim()
+
+    try {
+        return [pscustomobject]@{
+            Value    = ($trimmed | ConvertFrom-Json -ErrorAction Stop)
+            JsonText = $trimmed
+        }
+    } catch {}
+
+    for ($start = 0; $start -lt $trimmed.Length; $start++) {
+        $opening = $trimmed[$start]
+        if ($opening -ne '{' -and $opening -ne '[') {
+            continue
+        }
+
+        $candidate = Get-EmbeddedJsonCandidate -Text ($trimmed.Substring($start))
+        if ([string]::IsNullOrWhiteSpace($candidate)) {
+            continue
+        }
+
+        try {
+            return [pscustomobject]@{
+                Value    = ($candidate | ConvertFrom-Json -ErrorAction Stop)
+                JsonText = $candidate
+            }
+        } catch {}
+    }
+
+    if ($AllowScalar) {
+        $lines = @($trimmed -split "`r?`n" | ForEach-Object { "$_".Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        for ($index = $lines.Count - 1; $index -ge 0; $index--) {
+            $line = $lines[$index]
+            try {
+                return [pscustomobject]@{
+                    Value    = ($line | ConvertFrom-Json -ErrorAction Stop)
+                    JsonText = $line
+                }
+            } catch {}
+        }
+    }
+
+    return $null
+}
+
 function Set-ConsoleUtf8 {
     try {
         & cmd /c chcp 65001 > $null
@@ -4869,12 +5005,17 @@ function Resolve-PostInstallProviderAuthState {
     if (-not $jsonResult.TimedOut -and $jsonResult.ExitCode -eq 0) {
         try {
             $rawText = ($jsonResult.Output -join "`n").Trim()
-            $parsed = $rawText | ConvertFrom-Json -ErrorAction Stop
-            $providerName = Resolve-InstalledProviderNameFromModelsStatus -Parsed $parsed -RawText $rawText
+            $parsedResult = Convert-MixedOutputToJson -Text $rawText
+            if ($null -eq $parsedResult) {
+                throw "No valid JSON payload was found in models status output."
+            }
+
+            $parsed = $parsedResult.Value
+            $providerName = Resolve-InstalledProviderNameFromModelsStatus -Parsed $parsed -RawText $parsedResult.JsonText
             $authNode = Get-OptionalObjectProperty -InputObject $parsed -Name "auth"
             $providersNode = Get-OptionalObjectProperty -InputObject $authNode -Name "providers"
             $providerNode = Find-InstalledProviderAuthNode -ProvidersNode $providersNode -ProviderName $providerName
-            $providerText = if ($null -ne $providerNode) { $providerNode | ConvertTo-Json -Depth 10 -Compress } else { $rawText }
+            $providerText = if ($null -ne $providerNode) { $providerNode | ConvertTo-Json -Depth 10 -Compress } else { $parsedResult.JsonText }
 
             if (Test-InstalledAuthTextIndicatesMissing -Text $providerText) {
                 $status = "missing"

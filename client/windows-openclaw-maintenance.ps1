@@ -653,6 +653,156 @@ function Read-JsonFileSafe {
     }
 }
 
+
+function Get-EmbeddedJsonCandidate {
+    param([string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return $null
+    }
+
+    :candidateLoop for ($start = 0; $start -lt $Text.Length; $start++) {
+        $opening = $Text[$start]
+        if ($opening -ne '{' -and $opening -ne '[') {
+            continue
+        }
+
+        $stack = New-Object System.Collections.Generic.Stack[string]
+        $stack.Push([string]$opening)
+        $inString = $false
+        $escaping = $false
+
+        for ($index = $start + 1; $index -lt $Text.Length; $index++) {
+            $current = $Text[$index]
+
+            if ($inString) {
+                if ($escaping) {
+                    $escaping = $false
+                    continue
+                }
+
+                if ($current -eq '\') {
+                    $escaping = $true
+                    continue
+                }
+
+                if ($current -eq '"') {
+                    $inString = $false
+                }
+
+                continue
+            }
+
+            if ($current -eq '"') {
+                $inString = $true
+                continue
+            }
+
+            if ($current -eq '{' -or $current -eq '[') {
+                $stack.Push([string]$current)
+                continue
+            }
+
+            if ($current -eq '}') {
+                if ($stack.Count -eq 0 -or $stack.Peek() -ne '{') {
+                    continue candidateLoop
+                }
+
+                [void]$stack.Pop()
+                if ($stack.Count -eq 0) {
+                    return $Text.Substring($start, ($index - $start + 1)).Trim()
+                }
+
+                continue
+            }
+
+            if ($current -eq ']') {
+                if ($stack.Count -eq 0 -or $stack.Peek() -ne '[') {
+                    continue candidateLoop
+                }
+
+                [void]$stack.Pop()
+                if ($stack.Count -eq 0) {
+                    return $Text.Substring($start, ($index - $start + 1)).Trim()
+                }
+            }
+        }
+    }
+
+    return $null
+}
+
+# CLI JSON commands may emit plugin logs before the payload; recover the first valid JSON block.
+function Convert-MixedOutputToJson {
+    param(
+        [AllowNull()]
+        [string]$Text,
+        [switch]$AllowScalar
+    )
+
+    $trimmed = "$Text"
+    if ([string]::IsNullOrWhiteSpace($trimmed)) {
+        return $null
+    }
+
+    $trimmed = $trimmed.Trim()
+
+    try {
+        return [pscustomobject]@{
+            Value    = ($trimmed | ConvertFrom-Json -ErrorAction Stop)
+            JsonText = $trimmed
+        }
+    } catch {}
+
+    for ($start = 0; $start -lt $trimmed.Length; $start++) {
+        $opening = $trimmed[$start]
+        if ($opening -ne '{' -and $opening -ne '[') {
+            continue
+        }
+
+        $candidate = Get-EmbeddedJsonCandidate -Text ($trimmed.Substring($start))
+        if ([string]::IsNullOrWhiteSpace($candidate)) {
+            continue
+        }
+
+        try {
+            return [pscustomobject]@{
+                Value    = ($candidate | ConvertFrom-Json -ErrorAction Stop)
+                JsonText = $candidate
+            }
+        } catch {}
+    }
+
+    if ($AllowScalar) {
+        $lines = @($trimmed -split "`r?`n" | ForEach-Object { "$_".Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        for ($index = $lines.Count - 1; $index -ge 0; $index--) {
+            $line = $lines[$index]
+            try {
+                return [pscustomobject]@{
+                    Value    = ($line | ConvertFrom-Json -ErrorAction Stop)
+                    JsonText = $line
+                }
+            } catch {}
+        }
+    }
+
+    return $null
+}
+
+function Test-DaemonStatusHasLoadedFlag {
+    param([object]$DaemonStatus = $null)
+
+    if ($null -eq $DaemonStatus) {
+        return $false
+    }
+
+    try {
+        return ($DaemonStatus.PSObject.Properties["service"] -and $DaemonStatus.service -and $null -ne $DaemonStatus.service.PSObject.Properties["loaded"])
+    } catch {}
+
+    return $false
+}
+
 function Format-CmdArgument {
     param([string]$Value)
 
@@ -3172,9 +3322,18 @@ function Get-DaemonStatus {
             return $null
         }
 
-        $parsed = $statusJson | ConvertFrom-Json -ErrorAction Stop
+        $parsedResult = Convert-MixedOutputToJson -Text $statusJson
+        if ($null -eq $parsedResult) {
+            throw "No valid JSON payload was found in daemon status output."
+        }
+
+        if (-not [string]::Equals($parsedResult.JsonText, $statusJson, [System.StringComparison]::Ordinal)) {
+            Write-Log -Level "INFO" -Message "Recovered daemon status JSON from mixed CLI output."
+        }
+
+        $parsed = $parsedResult.Value
         $loadedProperty = $null
-        if ($parsed -and $parsed.PSObject.Properties["service"] -and $parsed.service) {
+        if (Test-DaemonStatusHasLoadedFlag -DaemonStatus $parsed) {
             $loadedProperty = $parsed.service.PSObject.Properties["loaded"]
         }
 
@@ -3277,8 +3436,10 @@ function Get-GatewayReadinessSnapshot {
 
     if ($script:Context.Capabilities.DaemonStatusJson) {
         $daemonStatus = Get-DaemonStatus -EmitUiStatus:$EmitUiStatus
-        $serviceLoadedKnown = $true
-        $serviceLoaded = Test-GatewayServiceLoaded -DaemonStatus $daemonStatus
+        $serviceLoadedKnown = Test-DaemonStatusHasLoadedFlag -DaemonStatus $daemonStatus
+        if ($serviceLoadedKnown) {
+            $serviceLoaded = Test-GatewayServiceLoaded -DaemonStatus $daemonStatus
+        }
     }
 
     $healthy = Test-Healthy
@@ -3424,6 +3585,12 @@ function Refresh-GatewayServiceIfLoaded {
     )
 
     $daemonStatus = Get-DaemonStatus
+    $serviceLoadedKnown = Test-DaemonStatusHasLoadedFlag -DaemonStatus $daemonStatus
+    if (-not $serviceLoadedKnown) {
+        Write-Log -Level "INFO" -Message "Could not determine whether the Gateway service is loaded; skipping loaded-service refresh."
+        return $false
+    }
+
     if (-not (Test-GatewayServiceLoaded -DaemonStatus $daemonStatus)) {
         Write-Log -Level "INFO" -Message "Gateway service is not loaded; skipping loaded-service refresh."
         return $false
@@ -3631,8 +3798,9 @@ function Convert-ConfigOutputToStringList {
     }
 
     $values = New-Object System.Collections.Generic.List[string]
-    try {
-        $parsed = $text | ConvertFrom-Json -ErrorAction Stop
+    $parsedResult = Convert-MixedOutputToJson -Text $text -AllowScalar
+    if ($null -ne $parsedResult) {
+        $parsed = $parsedResult.Value
         if ($parsed -is [System.Collections.IEnumerable] -and -not ($parsed -is [string])) {
             foreach ($item in @($parsed)) {
                 Add-UniqueString -List $values -Value "$item"
@@ -3643,15 +3811,10 @@ function Convert-ConfigOutputToStringList {
 
         Add-UniqueString -List $values -Value "$parsed"
         return @($values.ToArray())
-    } catch {
-        if ($text.StartsWith("[") -and $text.EndsWith("]")) {
-            Write-Log -Level "WARN" -Message ("Failed to parse gateway.controlUi.allowedOrigins as JSON: {0}" -f $_.Exception.Message)
-            return @()
-        }
-
-        Add-UniqueString -List $values -Value $text
-        return @($values.ToArray())
     }
+
+    Add-UniqueString -List $values -Value $text
+    return @($values.ToArray())
 }
 
 function Get-ConfigTextValue {
@@ -3708,12 +3871,10 @@ function Get-ConfigBooleanValue {
     }
 
     $text = "$($result.Value)".Trim()
-    try {
-        $parsed = $text | ConvertFrom-Json -ErrorAction Stop
-        if ($parsed -is [bool]) {
-            return [bool]$parsed
-        }
-    } catch {}
+    $parsedResult = Convert-MixedOutputToJson -Text $text -AllowScalar
+    if ($null -ne $parsedResult -and $parsedResult.Value -is [bool]) {
+        return [bool]$parsedResult.Value
+    }
 
     switch ($text.ToLowerInvariant()) {
         "true" { return $true }
@@ -4452,13 +4613,18 @@ function Resolve-ProviderAuthState {
             $result = Invoke-OpenClaw -Arguments @("models", "status", "--json") -TimeoutSeconds 10
             if (-not $result.TimedOut -and $result.ExitCode -eq 0) {
                 $rawText = ($result.Output -join "`n").Trim()
-                $parsed = $rawText | ConvertFrom-Json -ErrorAction Stop
-                $providerName = Resolve-ProviderNameFromModelsStatus -Parsed $parsed -RawText $rawText
+                $parsedResult = Convert-MixedOutputToJson -Text $rawText
+                if ($null -eq $parsedResult) {
+                    throw "No valid JSON payload was found in models status output."
+                }
+
+                $parsed = $parsedResult.Value
+                $providerName = Resolve-ProviderNameFromModelsStatus -Parsed $parsed -RawText $parsedResult.JsonText
                 $state.provider = $providerName
                 $authNode = Get-StateProperty -State $parsed -Name "auth"
                 $providersNode = Get-StateProperty -State $authNode -Name "providers"
                 $providerNode = Find-ProviderAuthNode -ProvidersNode $providersNode -ProviderName $providerName
-                $providerText = if ($null -ne $providerNode) { $providerNode | ConvertTo-Json -Depth 10 -Compress } else { $rawText }
+                $providerText = if ($null -ne $providerNode) { $providerNode | ConvertTo-Json -Depth 10 -Compress } else { $parsedResult.JsonText }
 
                 if (Test-AuthTextIndicatesMissing -Text $providerText) {
                     $state.status = "missing"
@@ -5090,9 +5256,14 @@ function Ensure-OfficialGatewayPersistence {
 
     if ($script:Context.Capabilities.DaemonStatusJson) {
         $daemonStatus = Get-DaemonStatus -EmitUiStatus
-        if (-not (Test-GatewayServiceLoaded -DaemonStatus $daemonStatus)) {
+        $serviceLoadedKnown = Test-DaemonStatusHasLoadedFlag -DaemonStatus $daemonStatus
+        if ($serviceLoadedKnown -and -not (Test-GatewayServiceLoaded -DaemonStatus $daemonStatus)) {
             Write-Log -Level "WARN" -Message "gateway install --force completed, but daemon status still reports service.loaded=false."
             return $false
+        }
+
+        if (-not $serviceLoadedKnown) {
+            Write-Log -Level "WARN" -Message "gateway install --force completed, but daemon status output did not yield a usable service.loaded value. Continuing with health/readiness probes."
         }
     }
 
