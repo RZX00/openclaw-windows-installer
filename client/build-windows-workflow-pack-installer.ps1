@@ -1025,6 +1025,7 @@ public static class Program
     internal const string PackName = __PACK_NAME__;
     internal const string PackDescription = __PACK_DESCRIPTION__;
     internal const string PackSkills = __PACK_SKILLS__;
+    internal static InstallerLaunchOptions LaunchOptions = new InstallerLaunchOptions("install", null);
 
     [STAThread]
     public static int Main(string[] args)
@@ -1035,6 +1036,8 @@ public static class Program
 
         try
         {
+            LaunchOptions = ParseLaunchOptions(args);
+
             if (!IsAdministrator())
             {
                 return ElevateSelf(args);
@@ -1071,10 +1074,12 @@ public static class Program
                 throw new FileNotFoundException("install-windows-workflow-pack.ps1 was not found in the embedded payload.", installScriptPath);
             }
 
-            string reportPath = Path.Combine(extractRoot, "install-report.json");
+            string reportPath = string.IsNullOrWhiteSpace(LaunchOptions.ExternalReportPath)
+                ? Path.Combine(extractRoot, "install-report.json")
+                : LaunchOptions.ExternalReportPath;
             progressForm.ReportStatus(InstallRunningMessage + "...", 96, Path.GetFileName(openClawRoot));
 
-            ProcessStartInfo startInfo = new ProcessStartInfo("powershell.exe", BuildInstallerArgumentLine(installScriptPath, extractRoot, openClawRoot, reportPath))
+            ProcessStartInfo startInfo = new ProcessStartInfo("powershell.exe", BuildInstallerArgumentLine(installScriptPath, extractRoot, openClawRoot, reportPath, LaunchOptions.Action))
             {
                 WorkingDirectory = extractRoot,
                 UseShellExecute = false,
@@ -1100,7 +1105,7 @@ public static class Program
                     progressForm = null;
                 }
 
-                ShowInstallResult(reportPath, exitCode, openClawRoot, installLog);
+                ShowInstallResult(reportPath, exitCode, openClawRoot, installLog, LaunchOptions.Action);
                 TryDeleteDirectory(extractRoot);
                 return exitCode;
             }
@@ -1120,6 +1125,66 @@ public static class Program
                 MessageBoxIcon.Error);
             TryDeleteDirectory(extractRoot);
             return 1;
+        }
+    }
+
+    private static InstallerLaunchOptions ParseLaunchOptions(string[] args)
+    {
+        string action = "install";
+        string reportPath = null;
+
+        for (int index = 0; index < args.Length; index++)
+        {
+            string arg = args[index];
+            if (string.Equals(arg, ElevationSentinel, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (string.Equals(arg, "--action", StringComparison.OrdinalIgnoreCase) && index + 1 < args.Length)
+            {
+                action = NormalizeAction(args[index + 1]);
+                index += 1;
+                continue;
+            }
+
+            if (string.Equals(arg, "--report-path", StringComparison.OrdinalIgnoreCase) && index + 1 < args.Length)
+            {
+                reportPath = args[index + 1];
+                index += 1;
+            }
+        }
+
+        return new InstallerLaunchOptions(action, reportPath);
+    }
+
+    internal static string NormalizeAction(string action)
+    {
+        switch ((action ?? string.Empty).Trim().ToLowerInvariant())
+        {
+            case "update":
+                return "update";
+            case "repair":
+                return "repair";
+            case "uninstall":
+                return "uninstall";
+            default:
+                return "install";
+        }
+    }
+
+    internal static string GetActionDisplayName(string action)
+    {
+        switch (NormalizeAction(action))
+        {
+            case "update":
+                return "Update";
+            case "repair":
+                return "Repair";
+            case "uninstall":
+                return "Uninstall";
+            default:
+                return "Install";
         }
     }
 
@@ -1323,7 +1388,7 @@ public static class Program
         return validated;
     }
 
-    private static string BuildInstallerArgumentLine(string installScriptPath, string invokerRoot, string openClawRoot, string reportPath)
+    private static string BuildInstallerArgumentLine(string installScriptPath, string invokerRoot, string openClawRoot, string reportPath, string action)
     {
         List<string> args = new List<string>();
         args.Add("-NoLogo");
@@ -1338,6 +1403,8 @@ public static class Program
         args.Add(invokerRoot);
         args.Add("-PackId");
         args.Add("__PACK_ID__");
+        args.Add("-Action");
+        args.Add(NormalizeAction(action));
         args.Add("-OpenClawRoot");
         args.Add(openClawRoot);
         args.Add("-ReportPath");
@@ -1408,18 +1475,20 @@ public static class Program
         return lines;
     }
 
-    private static void ShowInstallResult(string reportPath, int exitCode, string openClawRoot, List<string> installLog)
+    private static void ShowInstallResult(string reportPath, int exitCode, string openClawRoot, List<string> installLog, string action)
     {
-        string title = exitCode == 0 ? "Installation Complete" : "Installation Failed";
+        string actionLabel = GetActionDisplayName(action);
+        string title = exitCode == 0 ? actionLabel + " Complete" : actionLabel + " Failed";
         MessageBoxIcon icon = exitCode == 0 ? MessageBoxIcon.Information : MessageBoxIcon.Error;
-        string message = BuildInstallResultMessage(reportPath, exitCode, openClawRoot, installLog);
+        string message = BuildInstallResultMessage(reportPath, exitCode, openClawRoot, installLog, actionLabel);
         MessageBox.Show(message, title, MessageBoxButtons.OK, icon);
     }
 
-    private static string BuildInstallResultMessage(string reportPath, int exitCode, string openClawRoot, List<string> installLog)
+    private static string BuildInstallResultMessage(string reportPath, int exitCode, string openClawRoot, List<string> installLog, string actionLabel)
     {
         StringBuilder builder = new StringBuilder();
         builder.AppendLine("Package: " + PackName);
+        builder.AppendLine("Action: " + actionLabel);
         builder.AppendLine("Target Root: " + openClawRoot);
         builder.AppendLine("Result: " + (exitCode == 0 ? "Success" : "Failed"));
 
@@ -1950,6 +2019,18 @@ public static class Program
 
 }
 
+internal sealed class InstallerLaunchOptions
+{
+    public InstallerLaunchOptions(string action, string externalReportPath)
+    {
+        Action = Program.NormalizeAction(action);
+        ExternalReportPath = externalReportPath;
+    }
+
+    public string Action { get; private set; }
+    public string ExternalReportPath { get; private set; }
+}
+
 internal sealed class InstallSelectionResult
 {
     public InstallSelectionResult(bool confirmed, string openClawRoot)
@@ -1996,7 +2077,7 @@ internal sealed class InstallSelectionForm : Form
         titleLabel.Width = 710;
         titleLabel.Height = 30;
         titleLabel.Font = new Font("Segoe UI Semibold", 13F, FontStyle.Bold, GraphicsUnit.Point);
-        titleLabel.Text = "Confirm Workflow Pack Installation";
+        titleLabel.Text = "Confirm Workflow Pack " + Program.GetActionDisplayName(Program.LaunchOptions.Action);
         Controls.Add(titleLabel);
 
         packageLabel = new Label();
@@ -2041,7 +2122,7 @@ internal sealed class InstallSelectionForm : Form
         selectedLabel.Top = 410;
         selectedLabel.Width = 710;
         selectedLabel.Height = 22;
-        selectedLabel.Text = "Install into the selected OpenClaw root";
+        selectedLabel.Text = Program.GetActionDisplayName(Program.LaunchOptions.Action) + " using the selected OpenClaw root";
         Controls.Add(selectedLabel);
 
         selectedPathBox = new TextBox();
@@ -2085,7 +2166,7 @@ internal sealed class InstallSelectionForm : Form
         installButton.Top = 500;
         installButton.Width = 110;
         installButton.Height = 28;
-        installButton.Text = "Install";
+        installButton.Text = Program.GetActionDisplayName(Program.LaunchOptions.Action);
         installButton.Enabled = false;
         installButton.Click += delegate { ConfirmInstall(); };
         Controls.Add(installButton);
@@ -2119,8 +2200,8 @@ internal sealed class InstallSelectionForm : Form
         }
         builder.AppendLine();
         builder.AppendLine("The installer will first locate an existing OpenClaw base installation.");
-        builder.AppendLine("Installation starts only after you confirm the target root.");
-        builder.AppendLine("A result summary and verification report will be shown after installation.");
+        builder.AppendLine(Program.GetActionDisplayName(Program.LaunchOptions.Action) + " starts only after you confirm the target root.");
+        builder.AppendLine("A result summary and verification report will be shown after the workflow action finishes.");
         return builder.ToString().Trim();
     }
 
@@ -2154,7 +2235,7 @@ internal sealed class InstallSelectionForm : Form
             if (candidateListBox.Items.Count > 0)
             {
                 candidateListBox.SelectedIndex = 0;
-                statusLabel.Text = "Found " + candidateListBox.Items.Count.ToString() + " candidate roots. Confirm the target before installing.";
+                statusLabel.Text = "Found " + candidateListBox.Items.Count.ToString() + " candidate roots. Confirm the target before continuing.";
             }
             else
             {
@@ -2183,7 +2264,7 @@ internal sealed class InstallSelectionForm : Form
 
         SelectedOpenClawRoot = Convert.ToString(candidateListBox.SelectedItem);
         selectedPathBox.Text = SelectedOpenClawRoot;
-        statusLabel.Text = "A target root is selected. Click Install to continue.";
+        statusLabel.Text = "A target root is selected. Click " + Program.GetActionDisplayName(Program.LaunchOptions.Action) + " to continue.";
         installButton.Enabled = !string.IsNullOrWhiteSpace(SelectedOpenClawRoot);
     }
 
@@ -2225,7 +2306,7 @@ internal sealed class InstallSelectionForm : Form
             candidateListBox.SelectedItem = resolvedRoot;
             SelectedOpenClawRoot = resolvedRoot;
             selectedPathBox.Text = resolvedRoot;
-            statusLabel.Text = "The selected OpenClaw root is valid and ready for installation.";
+            statusLabel.Text = "The selected OpenClaw root is valid and ready for the workflow action.";
             installButton.Enabled = true;
         }
     }
@@ -2240,8 +2321,8 @@ internal sealed class InstallSelectionForm : Form
 
         DialogResult result = MessageBox.Show(
             this,
-            "Install \"" + Program.PackName + "\" into the following directory?\r\n\r\n" + SelectedOpenClawRoot + "\r\n\r\nClick Yes to continue.",
-            "Confirm Installation",
+            Program.GetActionDisplayName(Program.LaunchOptions.Action) + " \"" + Program.PackName + "\" using the following directory?\r\n\r\n" + SelectedOpenClawRoot + "\r\n\r\nClick Yes to continue.",
+            "Confirm " + Program.GetActionDisplayName(Program.LaunchOptions.Action),
             MessageBoxButtons.YesNo,
             MessageBoxIcon.Question);
 

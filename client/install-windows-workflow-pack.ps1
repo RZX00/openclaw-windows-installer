@@ -8,6 +8,8 @@ param(
     [string]$PackId,
     [string]$PackArchivePath,
     [string]$PackManifestPath,
+    [ValidateSet("install", "update", "repair", "uninstall")]
+    [string]$Action = "install",
     [switch]$DryRun
 )
 
@@ -49,6 +51,7 @@ $script:Installer = [ordered]@{
     UserConfigPath = $null
     UserExtensionsRoot = $null
     BundledExtensionsRoot = $null
+    RequestedAction = $Action
     DryRun = $DryRun.IsPresent
     Verification = New-Object System.Collections.Generic.List[object]
     WrapperPaths = New-Object System.Collections.Generic.List[string]
@@ -1235,16 +1238,18 @@ function Install-RuntimePayload {
 function Install-PluginPack {
     $pluginId = "$(Get-ObjectPropertyValue -Object $script:Installer.Manifest -Name "pluginId")"
     $existingPluginRoot = Resolve-InstalledPluginRoot -PluginId $pluginId
-    if ($existingPluginRoot) {
+    $forceReinstall = @("repair", "update") -contains "$($script:Installer.RequestedAction)"
+    if ($existingPluginRoot -and -not $forceReinstall) {
         Write-Info ("Plugin pack '{0}' is already installed at {1}; install step skipped." -f $pluginId, $existingPluginRoot)
         Add-VerificationEntry -Name "Install plugin pack" -ExitCode 0 -Message "Skipped: plugin already installed."
     } else {
-        Write-Info ("Installing plugin pack '{0}' from {1}" -f $pluginId, $script:Installer.SupportArchivePath)
+        $installVerb = if ($forceReinstall) { "Reinstalling" } else { "Installing" }
+        Write-Info ("{0} plugin pack '{1}' from {2}" -f $installVerb, $pluginId, $script:Installer.SupportArchivePath)
         Invoke-Probe -Name "Install plugin pack" -FilePath $script:Installer.OpenClawWrapperPath -Arguments @("plugins", "install", $script:Installer.SupportArchivePath) -UseCmd
         Assert-ProbeSucceeded -Name "Install plugin pack"
     }
 
-    if (Test-PluginEnabledInConfig -PluginId $pluginId) {
+    if ((Test-PluginEnabledInConfig -PluginId $pluginId) -and -not $forceReinstall) {
         Write-Info ("Plugin pack '{0}' is already enabled; enable step skipped." -f $pluginId)
         Add-VerificationEntry -Name "Enable plugin pack" -ExitCode 0 -Message "Skipped: plugin already enabled."
     } else {
@@ -1636,6 +1641,27 @@ function Save-WorkflowPackState {
     Write-Ok ("Workflow pack state written into install-state.json for '{0}'." -f $script:Installer.PackId)
 }
 
+function Remove-WorkflowPackState {
+    if (-not (Test-Path -LiteralPath $script:Installer.InstallStatePath)) {
+        return
+    }
+
+    $state = Read-JsonFile -Path $script:Installer.InstallStatePath
+    if (-not $state) {
+        return
+    }
+
+    $workflowPacks = Get-ObjectPropertyValue -Object $state -Name "workflowPacks"
+    if ($null -eq $workflowPacks) {
+        return
+    }
+
+    if (Remove-ObjectPropertyIfExists -Object $workflowPacks -Name $script:Installer.PackId) {
+        Save-JsonFile -Path $script:Installer.InstallStatePath -Object $state
+        Write-Ok ("Workflow pack state removed from install-state.json for '{0}'." -f $script:Installer.PackId)
+    }
+}
+
 function Write-InstallReport {
     param(
         [ValidateSet("install", "verify", "repair", "update", "uninstall")]
@@ -1729,20 +1755,110 @@ function Install-WorkflowPack {
     Update-WorkflowPackReadiness
 }
 
-try {
-    Install-WorkflowPack
-    $readiness = Get-WorkflowPackCurrentReadiness
-    $reportSuccess = Test-WorkflowPackOperationSuccess -Readiness $readiness
-    $summary = switch ("$($readiness.status)") {
-        "ready" { "Workflow pack installation completed and verification passed." }
-        "needs-setup" { "Workflow pack installation completed, but one or more manual setup steps are still required." }
-        default { "Workflow pack installation completed, but the package still needs repair before it can be treated as ready." }
+function Uninstall-WorkflowPack {
+    Initialize-Context
+
+    $pluginId = "$(Get-ObjectPropertyValue -Object $script:Installer.Manifest -Name "pluginId")"
+    $existingPluginRoot = Resolve-InstalledPluginRoot -PluginId $pluginId
+    $pluginEnabled = Test-PluginEnabledInConfig -PluginId $pluginId
+    $wrapperCandidates = New-Object System.Collections.Generic.List[string]
+
+    $state = Read-JsonFile -Path $script:Installer.InstallStatePath
+    $workflowPacks = Get-ObjectPropertyValue -Object $state -Name "workflowPacks"
+    $existingState = Get-ObjectPropertyValue -Object $workflowPacks -Name $script:Installer.PackId
+    foreach ($wrapperPath in @(Convert-ToArray -Value (Get-ObjectPropertyValue -Object $existingState -Name "wrapperPaths"))) {
+        Add-UniqueWorkflowPackString -List $wrapperCandidates -Value "$wrapperPath"
     }
-    Write-InstallReport -Action "install" -Success $reportSuccess -Summary $summary
-    Save-WorkflowPackState
+
+    $runtime = Get-ObjectPropertyValue -Object $script:Installer.Manifest -Name "runtime"
+    foreach ($commandName in @(Convert-ToArray -Value (Get-ObjectPropertyValue -Object $runtime -Name "commands"))) {
+        Add-UniqueWorkflowPackString -List $wrapperCandidates -Value (Join-Path $script:Installer.BinDir ("{0}.cmd" -f $commandName))
+    }
+
+    if ($pluginEnabled) {
+        Invoke-Probe -Name "Disable plugin pack" -FilePath $script:Installer.OpenClawWrapperPath -Arguments @("plugins", "disable", $pluginId) -UseCmd
+        Assert-ProbeSucceeded -Name "Disable plugin pack"
+    } else {
+        Add-VerificationEntry -Name "Disable plugin pack" -ExitCode 0 -Message "Skipped: plugin already disabled."
+    }
+
+    if ($existingPluginRoot -or $pluginEnabled) {
+        Invoke-Probe -Name "Uninstall plugin pack" -FilePath $script:Installer.OpenClawWrapperPath -Arguments @("plugins", "uninstall", $pluginId, "--force") -UseCmd
+        Assert-ProbeSucceeded -Name "Uninstall plugin pack"
+    } else {
+        Add-VerificationEntry -Name "Uninstall plugin pack" -ExitCode 0 -Message "Skipped: plugin payload was not detected."
+    }
+
+    foreach ($wrapperPath in @($wrapperCandidates.ToArray())) {
+        Remove-ManagedPath -Path $wrapperPath
+    }
+    Remove-ManagedPath -Path $script:Installer.RuntimeRoot
+    Remove-ManagedPath -Path $script:Installer.SupportRoot
+
+    $script:Installer.Provisioning = New-Object System.Collections.Generic.List[object]
+    $script:Installer.Prerequisites = New-Object System.Collections.Generic.List[object]
+    $script:Installer.Readiness = [pscustomobject]@{
+        status                   = "ready"
+        state                    = (Get-WorkflowPackReadinessLabel -Status "ready")
+        summary                  = "Workflow pack was uninstalled."
+        unresolvedRequiredSkills = @()
+        integrityIssues          = @()
+        provisioningFailures     = @()
+        blockingPrerequisites    = @()
+        warningPrerequisites     = @()
+    }
+}
+
+try {
+    switch ("$Action") {
+        "install" { Install-WorkflowPack }
+        "update" { Install-WorkflowPack }
+        "repair" { Install-WorkflowPack }
+        "uninstall" { Uninstall-WorkflowPack }
+    }
+
+    $readiness = Get-WorkflowPackCurrentReadiness
+    $reportSuccess = if ($Action -eq "uninstall") { $true } else { Test-WorkflowPackOperationSuccess -Readiness $readiness }
+    $summary = switch ("$Action") {
+        "install" {
+            switch ("$($readiness.status)") {
+                "ready" { "Workflow pack installation completed and verification passed." }
+                "needs-setup" { "Workflow pack installation completed, but one or more manual setup steps are still required." }
+                default { "Workflow pack installation completed, but the package still needs repair before it can be treated as ready." }
+            }
+        }
+        "update" {
+            switch ("$($readiness.status)") {
+                "ready" { "Workflow pack update completed and verification passed." }
+                "needs-setup" { "Workflow pack update completed, but one or more manual setup steps are still required." }
+                default { "Workflow pack update completed, but the package still needs repair before it can be treated as ready." }
+            }
+        }
+        "repair" {
+            switch ("$($readiness.status)") {
+                "ready" { "Workflow pack repair completed and verification passed." }
+                "needs-setup" { "Workflow pack repair completed, but one or more manual setup steps are still required." }
+                default { "Workflow pack repair completed, but the package still needs more work before it can be treated as ready." }
+            }
+        }
+        "uninstall" { "Workflow pack uninstall completed." }
+    }
+
+    Write-InstallReport -Action $Action -Success $reportSuccess -Summary $summary
+    if ($Action -eq "uninstall") {
+        Remove-WorkflowPackState
+    } else {
+        Save-WorkflowPackState
+    }
 } catch {
     try {
-        Write-InstallReport -Action "install" -Success $false -Summary "Workflow pack installation failed." -ErrorMessage $_.Exception.Message
+        $failureSummary = switch ("$Action") {
+            "update" { "Workflow pack update failed." }
+            "repair" { "Workflow pack repair failed." }
+            "uninstall" { "Workflow pack uninstall failed." }
+            default { "Workflow pack installation failed." }
+        }
+        Write-InstallReport -Action $Action -Success $false -Summary $failureSummary -ErrorMessage $_.Exception.Message
     } catch {}
     throw
 }
