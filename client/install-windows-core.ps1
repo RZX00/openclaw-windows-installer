@@ -4360,7 +4360,6 @@ function Get-DefaultPostInstallOnboardingArguments {
         "--install-daemon",
         "--skip-channels",
         "--skip-skills",
-        "--skip-health",
         "--skip-ui"
     )
 }
@@ -4385,6 +4384,407 @@ function Write-InstalledCommandOutput {
         } else {
             Write-Note ("{0}: {1}" -f $Prefix, $line)
         }
+    }
+}
+
+function Normalize-InstalledScalarValue {
+    param([string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return $null
+    }
+
+    $trimmed = $Value.Trim()
+    if ($trimmed.Length -ge 2) {
+        if (($trimmed.StartsWith('"') -and $trimmed.EndsWith('"')) -or ($trimmed.StartsWith("'") -and $trimmed.EndsWith("'"))) {
+            return $trimmed.Substring(1, $trimmed.Length - 2)
+        }
+    }
+
+    return $trimmed
+}
+
+function Get-FirstHttpUrlFromText {
+    param([string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return $null
+    }
+
+    $match = [regex]::Match($Text, 'https?://[^\s"''<>]+', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if ($match.Success) {
+        return $match.Value.Trim()
+    }
+
+    return $null
+}
+
+function Get-InstalledConfigTextValue {
+    param([string]$Key)
+
+    $result = Invoke-InstalledOpenClaw -Arguments @("config", "get", $Key) -TimeoutSeconds 30
+    if ($result.TimedOut -or $result.ExitCode -ne 0) {
+        return [pscustomobject]@{
+            Success  = $false
+            Value    = $null
+            TimedOut = $result.TimedOut
+            Output   = @($result.Output)
+        }
+    }
+
+    return [pscustomobject]@{
+        Success  = $true
+        Value    = Normalize-InstalledScalarValue -Value (($result.Output -join "`n").Trim())
+        TimedOut = $false
+        Output   = @($result.Output)
+    }
+}
+
+function Get-FirstProviderRefFromText {
+    param([string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return $null
+    }
+
+    $match = [regex]::Match($Text, '(?<provider>[a-z0-9][a-z0-9-]*)/(?<model>[a-z0-9][^"\s]*)', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if ($match.Success) {
+        return $match.Groups["provider"].Value.Trim().ToLowerInvariant()
+    }
+
+    return $null
+}
+
+function Find-InstalledProviderAuthNode {
+    param(
+        [object]$ProvidersNode,
+        [string]$ProviderName,
+        [int]$Depth = 0
+    )
+
+    if ($Depth -gt 5 -or $null -eq $ProvidersNode -or [string]::IsNullOrWhiteSpace($ProviderName)) {
+        return $null
+    }
+
+    $property = $ProvidersNode.PSObject.Properties[$ProviderName]
+    if ($null -ne $property) {
+        return $property.Value
+    }
+
+    if ($ProvidersNode -is [System.Collections.IEnumerable] -and -not ($ProvidersNode -is [string])) {
+        foreach ($item in @($ProvidersNode)) {
+            if ($null -eq $item) {
+                continue
+            }
+
+            $itemProvider = $null
+            foreach ($candidateName in @("provider", "name", "id")) {
+                $candidateProperty = $item.PSObject.Properties[$candidateName]
+                if ($null -ne $candidateProperty -and -not [string]::IsNullOrWhiteSpace("$($candidateProperty.Value)")) {
+                    $itemProvider = "$($candidateProperty.Value)".Trim().ToLowerInvariant()
+                    break
+                }
+            }
+
+            if ($itemProvider -eq $ProviderName.ToLowerInvariant()) {
+                return $item
+            }
+
+            $nested = Find-InstalledProviderAuthNode -ProvidersNode $item -ProviderName $ProviderName -Depth ($Depth + 1)
+            if ($null -ne $nested) {
+                return $nested
+            }
+        }
+    }
+
+    foreach ($childProperty in $ProvidersNode.PSObject.Properties) {
+        if ($null -eq $childProperty.Value -or $childProperty.Value -is [string]) {
+            continue
+        }
+
+        $nested = Find-InstalledProviderAuthNode -ProvidersNode $childProperty.Value -ProviderName $ProviderName -Depth ($Depth + 1)
+        if ($null -ne $nested) {
+            return $nested
+        }
+    }
+
+    return $null
+}
+
+function Resolve-InstalledProviderNameFromModelsStatus {
+    param(
+        [object]$Parsed,
+        [string]$RawText
+    )
+
+    $raw = "$RawText"
+    foreach ($pattern in @(
+        '"defaultProvider"\s*:\s*"(?<provider>[^"]+)"',
+        '"primaryProvider"\s*:\s*"(?<provider>[^"]+)"',
+        '"provider"\s*:\s*"(?<provider>anthropic|openai-codex|openai|openrouter|ollama|github-copilot|glm|zai|bedrock|gemini)"',
+        '"primary"\s*:\s*"(?<provider>[a-z0-9][a-z0-9-]*)/[^"]+"',
+        '"defaultModel"\s*:\s*"(?<provider>[a-z0-9][a-z0-9-]*)/[^"]+"'
+    )) {
+        $match = [regex]::Match($raw, $pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        if ($match.Success) {
+            return $match.Groups["provider"].Value.Trim().ToLowerInvariant()
+        }
+    }
+
+    $provider = Get-FirstProviderRefFromText -Text $raw
+    if (-not [string]::IsNullOrWhiteSpace($provider)) {
+        return $provider
+    }
+
+    $authNode = Get-OptionalObjectProperty -InputObject $Parsed -Name "auth"
+    $providersNode = Get-OptionalObjectProperty -InputObject $authNode -Name "providers"
+    if ($null -ne $providersNode) {
+        $providerNames = @($providersNode.PSObject.Properties | ForEach-Object { $_.Name } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        if ($providerNames.Count -eq 1) {
+            return "$($providerNames[0])".Trim().ToLowerInvariant()
+        }
+    }
+
+    return $null
+}
+
+function Test-InstalledAuthTextIndicatesMissing {
+    param([string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return $false
+    }
+
+    return [regex]::IsMatch($Text, '(?i)(missing auth|missing credentials|no credentials|expired|unresolved|invalid auth|auth required|setup-token required|login required)')
+}
+
+function Test-InstalledAuthTextIndicatesReady {
+    param([string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return $false
+    }
+
+    return [regex]::IsMatch($Text, '(?i)\b(ready|configured|available|healthy|valid|connected|ok)\b')
+}
+
+function Get-TargetedPostInstallOnboardingArguments {
+    param([string]$ProviderName)
+
+    switch ("$ProviderName".Trim().ToLowerInvariant()) {
+        "anthropic" {
+            return @("onboard", "--install-daemon", "--auth-choice", "setup-token")
+        }
+        "openai-codex" {
+            return @("onboard", "--install-daemon", "--auth-choice", "openai-codex")
+        }
+        default {
+            return @("onboard", "--install-daemon")
+        }
+    }
+}
+
+function Ensure-PostInstallGatewayTokenReady {
+    $modeResult = Get-InstalledConfigTextValue -Key "gateway.auth.mode"
+    $mode = if ($modeResult.Success -and -not [string]::IsNullOrWhiteSpace("$($modeResult.Value)")) {
+        "$($modeResult.Value)".Trim().ToLowerInvariant()
+    } else {
+        "token"
+    }
+
+    if ($mode -eq "none") {
+        return [pscustomobject]@{
+            Ready   = $true
+            Summary = (L "Gateway auth 已显式关闭。" "Gateway auth is explicitly disabled.")
+        }
+    }
+
+    $envToken = [Environment]::GetEnvironmentVariable("OPENCLAW_GATEWAY_TOKEN")
+    if (-not [string]::IsNullOrWhiteSpace($envToken)) {
+        return [pscustomobject]@{
+            Ready   = $true
+            Summary = (L "Gateway token 已通过环境变量提供。" "Gateway token is already available from the environment.")
+        }
+    }
+
+    $tokenResult = Get-InstalledConfigTextValue -Key "gateway.auth.token"
+    if ($tokenResult.Success -and -not [string]::IsNullOrWhiteSpace("$($tokenResult.Value)")) {
+        return [pscustomobject]@{
+            Ready   = $true
+            Summary = (L "Gateway token 已写入配置。" "Gateway token is already configured.")
+        }
+    }
+
+    Write-Info (L "当前缺少 Gateway token，正在尝试自动生成..." "Gateway token is missing. Attempting to generate one automatically...")
+    $doctorResult = Invoke-InstalledOpenClaw -Arguments @("doctor", "--generate-gateway-token") -TimeoutSeconds 90
+    if (-not $doctorResult.TimedOut -and $doctorResult.ExitCode -eq 0) {
+        $tokenResult = Get-InstalledConfigTextValue -Key "gateway.auth.token"
+        if ($tokenResult.Success -and -not [string]::IsNullOrWhiteSpace("$($tokenResult.Value)")) {
+            return [pscustomobject]@{
+                Ready   = $true
+                Summary = (L "已自动生成 Gateway token。" "Gateway token was generated automatically.")
+            }
+        }
+    }
+
+    Write-InstalledCommandOutput -Result $doctorResult -Prefix "gateway-token"
+    return [pscustomobject]@{
+        Ready   = $false
+        Summary = (L "Gateway token 仍未就绪。" "Gateway token is still missing.")
+    }
+}
+
+function Test-PostInstallDashboardReady {
+    $result = Invoke-InstalledOpenClaw -Arguments @("dashboard", "--no-open") -TimeoutSeconds 30
+    if ($result.TimedOut) {
+        return [pscustomobject]@{
+            Ready   = $false
+            Summary = (L "Dashboard 预检超时。" "Dashboard verification timed out.")
+        }
+    }
+
+    if ($result.ExitCode -ne 0) {
+        Write-InstalledCommandOutput -Result $result -Prefix "dashboard"
+        return [pscustomobject]@{
+            Ready   = $false
+            Summary = (L "Dashboard 预检失败。" "Dashboard verification failed.")
+        }
+    }
+
+    $dashboardUrl = Get-FirstHttpUrlFromText -Text (($result.Output -join "`n").Trim())
+    if ([string]::IsNullOrWhiteSpace($dashboardUrl)) {
+        Write-InstalledCommandOutput -Result $result -Prefix "dashboard"
+        return [pscustomobject]@{
+            Ready   = $false
+            Summary = (L "Dashboard 预检未返回可用地址。" "Dashboard verification did not return a usable URL.")
+        }
+    }
+
+    return [pscustomobject]@{
+        Ready   = $true
+        Summary = (L "Dashboard 已返回可用地址。" "Dashboard returned a usable URL.")
+        Url     = $dashboardUrl
+    }
+}
+
+function Resolve-PostInstallProviderAuthState {
+    $providerName = $null
+    $status = "unknown"
+    $source = "fast-classify"
+    $message = (L "模型认证状态无法快速判断。" "Provider auth could not be classified quickly.")
+
+    $jsonResult = Invoke-InstalledOpenClaw -Arguments @("models", "status", "--json") -TimeoutSeconds 15
+    if (-not $jsonResult.TimedOut -and $jsonResult.ExitCode -eq 0) {
+        try {
+            $rawText = ($jsonResult.Output -join "`n").Trim()
+            $parsed = $rawText | ConvertFrom-Json -ErrorAction Stop
+            $providerName = Resolve-InstalledProviderNameFromModelsStatus -Parsed $parsed -RawText $rawText
+            $authNode = Get-OptionalObjectProperty -InputObject $parsed -Name "auth"
+            $providersNode = Get-OptionalObjectProperty -InputObject $authNode -Name "providers"
+            $providerNode = Find-InstalledProviderAuthNode -ProvidersNode $providersNode -ProviderName $providerName
+            $providerText = if ($null -ne $providerNode) { $providerNode | ConvertTo-Json -Depth 10 -Compress } else { $rawText }
+
+            if (Test-InstalledAuthTextIndicatesMissing -Text $providerText) {
+                $status = "missing"
+                $source = "models-status-json"
+                $message = (L "模型认证缺失或已过期。" "Provider auth is missing or expired.")
+            } elseif (Test-InstalledAuthTextIndicatesReady -Text $providerText) {
+                $status = "ready"
+                $source = "models-status-json"
+                $message = (L "模型认证已就绪。" "Provider auth is available.")
+            }
+        } catch {
+            Write-Warn ("{0}: {1}" -f (L "解析 models status --json 失败" "Failed to parse models status --json"), $_.Exception.Message)
+        }
+    }
+
+    if ($status -eq "unknown") {
+        $plainResult = Invoke-InstalledOpenClaw -Arguments @("models", "status") -TimeoutSeconds 10
+        if (-not $plainResult.TimedOut -and $plainResult.ExitCode -eq 0) {
+            $rawText = ($plainResult.Output -join "`n").Trim()
+            if ([string]::IsNullOrWhiteSpace($providerName)) {
+                $providerName = Get-FirstProviderRefFromText -Text $rawText
+            }
+            if (Test-InstalledAuthTextIndicatesMissing -Text $rawText) {
+                $status = "missing"
+                $source = "models-status-text"
+                $message = (L "模型认证缺失或已过期。" "Provider auth is missing or expired.")
+            } elseif (Test-InstalledAuthTextIndicatesReady -Text $rawText) {
+                $status = "ready"
+                $source = "models-status-text"
+                $message = (L "模型认证已就绪。" "Provider auth is available.")
+            }
+        }
+    }
+
+    $providerDisplay = if ([string]::IsNullOrWhiteSpace("$providerName")) { (L "当前 provider" "the current provider") } else { $providerName }
+    return [pscustomobject]@{
+        Ready             = ($status -ne "missing")
+        RequiresAttention = ($status -eq "missing")
+        Provider          = $providerName
+        Status            = $status
+        Source            = $source
+        Summary           = if ($status -eq "missing") { (L ("Dashboard 已可用，但 {0} 的模型认证仍缺失。" -f $providerDisplay) ("Dashboard is reachable, but model auth for {0} is still missing." -f $providerDisplay)) } else { $message }
+    }
+}
+
+function Test-PostInstallReadiness {
+    if ($script:Installer.DryRun) {
+        Write-Note (L "DryRun 跳过安装后就绪检查。" "Dry-run skipping post-install readiness checks.")
+        return [pscustomobject]@{
+            Ready                       = $true
+            RequiresInteractiveFallback = $false
+            FallbackProvider            = $null
+            Summary                     = $null
+        }
+    }
+
+    Write-Info (L "正在校验安装后的本地就绪状态..." "Validating post-install local readiness...")
+
+    $gatewayToken = Ensure-PostInstallGatewayTokenReady
+    if ($gatewayToken.Ready) {
+        Write-Ok $gatewayToken.Summary
+    } else {
+        Write-Warn $gatewayToken.Summary
+    }
+
+    $dashboard = Test-PostInstallDashboardReady
+    if ($dashboard.Ready) {
+        Write-Ok $dashboard.Summary
+    } else {
+        Write-Warn $dashboard.Summary
+    }
+
+    $providerAuth = Resolve-PostInstallProviderAuthState
+    switch ("$($providerAuth.Status)") {
+        "ready" {
+            Write-Ok $providerAuth.Summary
+        }
+        "missing" {
+            Write-Warn $providerAuth.Summary
+        }
+        default {
+            Write-Note $providerAuth.Summary
+        }
+    }
+
+    $requiresInteractiveFallback = (-not $gatewayToken.Ready) -or (-not $dashboard.Ready) -or $providerAuth.RequiresAttention
+    $summaryParts = New-Object System.Collections.Generic.List[string]
+    if (-not $gatewayToken.Ready) {
+        $summaryParts.Add($gatewayToken.Summary) | Out-Null
+    }
+    if (-not $dashboard.Ready) {
+        $summaryParts.Add($dashboard.Summary) | Out-Null
+    }
+    if ($providerAuth.RequiresAttention) {
+        $summaryParts.Add($providerAuth.Summary) | Out-Null
+    }
+
+    return [pscustomobject]@{
+        Ready                       = (-not $requiresInteractiveFallback)
+        RequiresInteractiveFallback = $requiresInteractiveFallback
+        FallbackProvider            = $(if ($providerAuth.RequiresAttention) { $providerAuth.Provider } else { $null })
+        Summary                     = $(if ($summaryParts.Count -gt 0) { $summaryParts -join " " } else { $null })
     }
 }
 
@@ -4440,6 +4840,8 @@ function Invoke-AutomatedPostInstallBootstrap {
         return [pscustomobject]@{
             Automated                   = $false
             RequiresInteractiveFallback = $false
+            FallbackProvider            = $null
+            ReadinessSummary            = $null
         }
     }
 
@@ -4449,6 +4851,8 @@ function Invoke-AutomatedPostInstallBootstrap {
         return [pscustomobject]@{
             Automated                   = $true
             RequiresInteractiveFallback = $false
+            FallbackProvider            = $null
+            ReadinessSummary            = $null
         }
     }
 
@@ -4459,6 +4863,8 @@ function Invoke-AutomatedPostInstallBootstrap {
         return [pscustomobject]@{
             Automated                   = $false
             RequiresInteractiveFallback = $true
+            FallbackProvider            = $null
+            ReadinessSummary            = (L "自动初始化配置超时。" "Automated bootstrap timed out.")
         }
     }
 
@@ -4468,6 +4874,8 @@ function Invoke-AutomatedPostInstallBootstrap {
         return [pscustomobject]@{
             Automated                   = $false
             RequiresInteractiveFallback = $true
+            FallbackProvider            = $null
+            ReadinessSummary            = (L "自动初始化配置失败。" "Automated bootstrap failed.")
         }
     }
 
@@ -4480,17 +4888,24 @@ function Invoke-AutomatedPostInstallBootstrap {
     return [pscustomobject]@{
         Automated                   = $true
         RequiresInteractiveFallback = $false
+        FallbackProvider            = $null
+        ReadinessSummary            = $null
     }
 }
 
 function Open-ConfigurationPage {
+    param([string]$ProviderName = $null)
+
     if ($script:Installer.NoOnboard) {
         Write-Note (L "根据参数跳过自动打开配置页面。" "Skipping automatic configuration page launch because of parameter.")
         return
     }
 
+    $arguments = @(Get-TargetedPostInstallOnboardingArguments -ProviderName $ProviderName)
+    $formattedArguments = (($arguments | ForEach-Object { Format-CmdArgument -Value $_ }) -join ' ')
+
     if ($script:Installer.DryRun) {
-        Write-Note (L "DryRun 打开配置页面：openclaw onboard --install-daemon" "Dry-run open configuration page: openclaw onboard --install-daemon")
+        Write-Note ("{0}: openclaw {1}" -f (L "DryRun 打开配置页面" "Dry-run open configuration page"), ($arguments -join ' '))
         return
     }
 
@@ -4502,11 +4917,11 @@ function Open-ConfigurationPage {
 
     Write-Info (L "正在打开 OpenClaw 配置页面..." "Opening the OpenClaw configuration page...")
     try {
-        $configCommand = "`"`"$wrapperPath`" onboard --install-daemon`""
+        $configCommand = ('call "{0}" {1}' -f $wrapperPath, $formattedArguments)
         Start-Process -FilePath "cmd.exe" -ArgumentList @("/d", "/k", $configCommand) -WorkingDirectory $script:Installer.DataRoot | Out-Null
         Write-Ok (L "配置窗口已启动（新命令行窗口）。请在该窗口继续完成配置。" "Configuration window launched in a new terminal. Continue setup there.")
     } catch {
-        Write-Warn ("{0}: {1}" -f (L "打开配置页面失败，请手动执行 openclaw onboard --install-daemon" "Failed to open the configuration page automatically; run openclaw onboard --install-daemon manually"), $_.Exception.Message)
+        Write-Warn ("{0}: {1}" -f (L ("打开配置页面失败，请手动执行 openclaw {0}" -f ($arguments -join ' ')) ("Failed to open the configuration page automatically; run openclaw {0} manually" -f ($arguments -join ' '))), $_.Exception.Message)
     }
 }
 
@@ -4665,12 +5080,23 @@ function Invoke-InstallFlow {
             if ($licenseActivated) {
                 $postInstallBootstrap = Invoke-AutomatedPostInstallBootstrap
                 Run-Doctor
+                if ($null -ne $postInstallBootstrap -and $postInstallBootstrap.Automated -and -not $postInstallBootstrap.RequiresInteractiveFallback) {
+                    $readiness = Test-PostInstallReadiness
+                    if ($readiness.RequiresInteractiveFallback) {
+                        $postInstallBootstrap.RequiresInteractiveFallback = $true
+                        $postInstallBootstrap.FallbackProvider = $readiness.FallbackProvider
+                        $postInstallBootstrap.ReadinessSummary = $readiness.Summary
+                        Write-Warn ("{0}: {1}" -f (L "安装后的自动配置仍需补充步骤" "Post-install auto configuration still needs follow-up"), $readiness.Summary)
+                    } else {
+                        Write-Ok (L "安装后的本地就绪检查通过。" "Post-install local readiness checks passed.")
+                    }
+                }
             } else {
                 Write-Warn (L "授权二次确认未完成；仍将打开配置窗口，后续可在配置窗口继续完成授权与初始化。" "Post-install license recheck did not complete; opening configuration window anyway so authorization and initialization can continue there.")
             }
             Show-SuccessSummary
             if (-not $licenseActivated -or ($null -ne $postInstallBootstrap -and $postInstallBootstrap.RequiresInteractiveFallback)) {
-                Open-ConfigurationPage
+                Open-ConfigurationPage -ProviderName $(if ($null -ne $postInstallBootstrap) { $postInstallBootstrap.FallbackProvider } else { $null })
             }
             return
         }
