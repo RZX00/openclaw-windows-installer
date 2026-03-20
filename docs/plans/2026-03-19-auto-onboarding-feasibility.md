@@ -311,3 +311,22 @@ This fix hardens install-time Gateway/dashboard readiness, but full cold-machine
 - API-key-first install flow can be fully automated if provider and secret are
   collected at install time.
 - OAuth/setup-token cold-machine flows still need user-owned interaction.
+
+### Product decision
+
+Selected direction: robust hybrid.
+
+```text
+Install target:
+  - Gateway token ready
+  - Gateway daemon installed and healthy
+  - Dashboard path verified
+
+Install non-goal:
+  - force provider credential collection during install
+
+If provider auth is still missing after install:
+  - do not pretend install reached full chat-ready state
+  - immediately open targeted provider onboarding/auth repair
+  - leave first Start focused on stable runtime recovery, not first-time auth surprise
+```
