@@ -167,15 +167,34 @@ Acceptance
   -> store UI can consume one stable item/install/readiness contract
 ```
 
+## Stage Status
+
+```text
+Stage 1
+  status: completed
+  outcome:
+    -> builder-side shared contract helpers extracted
+
+Stage 2
+  status: completed
+  outcome:
+    -> installer + maintenance now share one readiness engine
+
+Stage 3
+  status: in progress
+  outcome target:
+    -> catalog + install-state + latest report projected into one local install registry
+```
+
 ## Immediate Phase To Execute Now
 
 ```text
-This turn executes Stage 1 only.
+This turn executes Stage 3.
 
 Why:
-  - lowest-risk structural refactor
-  - immediately reduces drift between builder scripts
-  - creates the contract-first base required for later installer/store convergence
+  - desktop store should not join 3 different local data sources
+  - local install state must become a first-class store contract
+  - this unlocks a future native app-store shell without reworking install semantics again
 ```
 
 ## Stage 1 Review Checklist

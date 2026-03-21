@@ -25,6 +25,7 @@ try {
 } catch {}
 
 Import-Module (Join-Path $PSScriptRoot 'modules\OpenClaw.WorkflowPack.Installer.psm1') -Force -DisableNameChecking
+Import-Module (Join-Path $PSScriptRoot 'modules\OpenClaw.WorkflowPack.Store.psm1') -Force -DisableNameChecking
 
 $script:Installer = [ordered]@{
     Locale = $Locale
@@ -579,6 +580,28 @@ function Get-WorkflowPackCurrentReadiness {
     }
 
     return (New-WorkflowPackDefaultReadiness -Summary "Workflow pack installation did not produce a readiness result.")
+}
+
+
+function Sync-WorkflowPackInstallRegistrySnapshot {
+    $catalogPath = Resolve-FirstExistingPath -Candidates @(
+        ([Environment]::GetEnvironmentVariable('OPENCLAW_STORE_CATALOG_PATH')),
+        $(if (-not [string]::IsNullOrWhiteSpace($script:Installer.SupportRoot)) { Join-Path $script:Installer.SupportRoot 'openclaw-store-catalog.json' } else { $null }),
+        $(if (-not [string]::IsNullOrWhiteSpace($script:Installer.InvokerRoot)) { Join-Path $script:Installer.InvokerRoot 'openclaw-store-catalog.json' } else { $null }),
+        $(if (-not [string]::IsNullOrWhiteSpace($script:Installer.InvokerRoot)) { Join-Path $script:Installer.InvokerRoot 'release\openclaw-store-catalog.json' } else { $null })
+    )
+    $outputPath = Join-Path $script:Installer.StoreReportsRoot 'install-registry.json'
+
+    try {
+        OpenClaw.WorkflowPack.Store\Sync-WorkflowPackInstallRegistry `
+            -OpenClawRoot $script:Installer.OpenClawRoot `
+            -StatePath $script:Installer.InstallStatePath `
+            -CatalogPath $catalogPath `
+            -OutputPath $outputPath | Out-Null
+        Write-Ok ("Workflow pack install registry refreshed: {0}" -f $outputPath)
+    } catch {
+        Write-Warn ("Workflow pack install registry refresh failed: {0}" -f $_.Exception.Message)
+    }
 }
 
 function New-WorkflowPackReportPaths {

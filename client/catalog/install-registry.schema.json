@@ -1,0 +1,309 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openclaw.local/schemas/store-install-registry.schema.json",
+  "title": "OpenClaw Store Install Registry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "generatedAt",
+    "catalogInfo",
+    "items",
+    "summary",
+    "metadata"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "openClawRoot": {
+      "$ref": "#/$defs/nullableString"
+    },
+    "statePath": {
+      "$ref": "#/$defs/nullableString"
+    },
+    "catalogInfo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "loaded",
+        "channel",
+        "catalogVersion",
+        "itemCount"
+      ],
+      "properties": {
+        "path": { "$ref": "#/$defs/nullableString" },
+        "loaded": { "type": "boolean" },
+        "channel": { "$ref": "#/$defs/nullableString" },
+        "catalogVersion": { "$ref": "#/$defs/nullableString" },
+        "itemCount": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "items": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/registryItem" }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "itemCount",
+        "catalogItemCount",
+        "installedCount",
+        "readyCount",
+        "needsSetupCount",
+        "needsRepairCount",
+        "availableCount",
+        "importedCount"
+      ],
+      "properties": {
+        "itemCount": { "type": "integer", "minimum": 0 },
+        "catalogItemCount": { "type": "integer", "minimum": 0 },
+        "installedCount": { "type": "integer", "minimum": 0 },
+        "readyCount": { "type": "integer", "minimum": 0 },
+        "needsSetupCount": { "type": "integer", "minimum": 0 },
+        "needsRepairCount": { "type": "integer", "minimum": 0 },
+        "availableCount": { "type": "integer", "minimum": 0 },
+        "importedCount": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "generator",
+        "schemaVersion",
+        "projectedFrom"
+      ],
+      "properties": {
+        "generator": { "type": "string", "minLength": 1 },
+        "schemaVersion": { "type": "integer", "const": 1 },
+        "projectedFrom": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "nullableString": {
+      "type": ["string", "null"]
+    },
+    "nullableBoolean": {
+      "type": ["boolean", "null"]
+    },
+    "stringArray": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "trust": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "catalogBacked",
+        "channel",
+        "trustLevel",
+        "auditStatus",
+        "auditSummary",
+        "sourcePinned",
+        "releaseBlocked"
+      ],
+      "properties": {
+        "catalogBacked": { "type": "boolean" },
+        "channel": { "$ref": "#/$defs/nullableString" },
+        "trustLevel": { "$ref": "#/$defs/nullableString" },
+        "auditStatus": { "$ref": "#/$defs/nullableString" },
+        "auditSummary": { "$ref": "#/$defs/nullableString" },
+        "sourcePinned": { "$ref": "#/$defs/nullableBoolean" },
+        "releaseBlocked": { "$ref": "#/$defs/nullableBoolean" }
+      }
+    },
+    "catalogFacet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "listed",
+        "catalogVersion",
+        "channel",
+        "supportsOfflineInstall",
+        "supportsRepair",
+        "supportsUninstall",
+        "primaryArtifactPath",
+        "primaryArtifactSha256",
+        "releaseBlocked"
+      ],
+      "properties": {
+        "listed": { "type": "boolean" },
+        "catalogVersion": { "$ref": "#/$defs/nullableString" },
+        "channel": { "$ref": "#/$defs/nullableString" },
+        "supportsOfflineInstall": { "type": "boolean" },
+        "supportsRepair": { "type": "boolean" },
+        "supportsUninstall": { "type": "boolean" },
+        "primaryArtifactPath": { "$ref": "#/$defs/nullableString" },
+        "primaryArtifactSha256": { "$ref": "#/$defs/nullableString" },
+        "releaseBlocked": { "$ref": "#/$defs/nullableBoolean" }
+      }
+    },
+    "installation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "present",
+        "state",
+        "openClawRoot",
+        "packId",
+        "displayName",
+        "installedAt",
+        "verifiedAt",
+        "supportRoot",
+        "archivePath",
+        "installerPath",
+        "manifestPath",
+        "buildMetadataPath",
+        "sourceLockPath",
+        "runtimeRoot",
+        "reportRoot",
+        "latestReportPath",
+        "lastReportPath",
+        "pluginIds",
+        "wrapperPaths"
+      ],
+      "properties": {
+        "present": { "type": "boolean" },
+        "state": { "type": "string", "enum": ["installed", "not-installed"] },
+        "openClawRoot": { "$ref": "#/$defs/nullableString" },
+        "packId": { "$ref": "#/$defs/nullableString" },
+        "displayName": { "$ref": "#/$defs/nullableString" },
+        "installedAt": { "$ref": "#/$defs/nullableString" },
+        "verifiedAt": { "$ref": "#/$defs/nullableString" },
+        "supportRoot": { "$ref": "#/$defs/nullableString" },
+        "archivePath": { "$ref": "#/$defs/nullableString" },
+        "installerPath": { "$ref": "#/$defs/nullableString" },
+        "manifestPath": { "$ref": "#/$defs/nullableString" },
+        "buildMetadataPath": { "$ref": "#/$defs/nullableString" },
+        "sourceLockPath": { "$ref": "#/$defs/nullableString" },
+        "runtimeRoot": { "$ref": "#/$defs/nullableString" },
+        "reportRoot": { "$ref": "#/$defs/nullableString" },
+        "latestReportPath": { "$ref": "#/$defs/nullableString" },
+        "lastReportPath": { "$ref": "#/$defs/nullableString" },
+        "pluginIds": { "$ref": "#/$defs/stringArray" },
+        "wrapperPaths": { "$ref": "#/$defs/stringArray" }
+      }
+    },
+    "contents": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pluginIds", "skillIds", "runtimeProfiles"],
+      "properties": {
+        "pluginIds": { "$ref": "#/$defs/stringArray" },
+        "skillIds": { "$ref": "#/$defs/stringArray" },
+        "runtimeProfiles": { "$ref": "#/$defs/stringArray" }
+      }
+    },
+    "readiness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "applicable",
+        "statusId",
+        "state",
+        "summary",
+        "source",
+        "success",
+        "repairAllowed",
+        "unresolvedRequiredSkillCount",
+        "integrityIssueCount",
+        "provisioningFailureCount",
+        "blockingPrerequisiteCount",
+        "warningPrerequisiteCount"
+      ],
+      "properties": {
+        "applicable": { "type": "boolean" },
+        "statusId": { "type": ["string", "null"], "enum": ["ready", "needs-setup", "needs-repair", null] },
+        "state": { "$ref": "#/$defs/nullableString" },
+        "summary": { "type": "string", "minLength": 1 },
+        "source": { "type": "string", "enum": ["latest-report", "install-state", "default", "not-installed"] },
+        "success": { "type": "boolean" },
+        "repairAllowed": { "type": "boolean" },
+        "unresolvedRequiredSkillCount": { "type": "integer", "minimum": 0 },
+        "integrityIssueCount": { "type": "integer", "minimum": 0 },
+        "provisioningFailureCount": { "type": "integer", "minimum": 0 },
+        "blockingPrerequisiteCount": { "type": "integer", "minimum": 0 },
+        "warningPrerequisiteCount": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "actions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "installAvailable",
+        "repairAvailable",
+        "uninstallAvailable",
+        "reportAvailable",
+        "supportRootAvailable",
+        "reinstallMediaAvailable"
+      ],
+      "properties": {
+        "installAvailable": { "type": "boolean" },
+        "repairAvailable": { "type": "boolean" },
+        "uninstallAvailable": { "type": "boolean" },
+        "reportAvailable": { "type": "boolean" },
+        "supportRootAvailable": { "type": "boolean" },
+        "reinstallMediaAvailable": { "type": "boolean" }
+      }
+    },
+    "registryItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "packId",
+        "lane",
+        "installed",
+        "title",
+        "summary",
+        "version",
+        "publisher",
+        "slug",
+        "itemType",
+        "categories",
+        "tags",
+        "trust",
+        "catalog",
+        "installation",
+        "contents",
+        "readiness",
+        "actions"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "packId": { "$ref": "#/$defs/nullableString" },
+        "lane": { "type": "string", "enum": ["curated", "imported"] },
+        "installed": { "type": "boolean" },
+        "title": { "type": "string", "minLength": 1 },
+        "summary": { "type": "string", "minLength": 1 },
+        "version": { "$ref": "#/$defs/nullableString" },
+        "publisher": { "$ref": "#/$defs/nullableString" },
+        "slug": { "$ref": "#/$defs/nullableString" },
+        "itemType": { "$ref": "#/$defs/nullableString" },
+        "categories": { "$ref": "#/$defs/stringArray" },
+        "tags": { "$ref": "#/$defs/stringArray" },
+        "trust": { "$ref": "#/$defs/trust" },
+        "catalog": { "$ref": "#/$defs/catalogFacet" },
+        "installation": { "$ref": "#/$defs/installation" },
+        "contents": { "$ref": "#/$defs/contents" },
+        "readiness": { "$ref": "#/$defs/readiness" },
+        "actions": { "$ref": "#/$defs/actions" }
+      }
+    }
+  }
+}

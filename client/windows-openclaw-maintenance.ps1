@@ -11,6 +11,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 Import-Module (Join-Path $PSScriptRoot 'modules\OpenClaw.WorkflowPack.Installer.psm1') -Force -DisableNameChecking
+Import-Module (Join-Path $PSScriptRoot 'modules\OpenClaw.WorkflowPack.Store.psm1') -Force -DisableNameChecking
 
 $script:ExitCodes = @{
     Success           = 0
@@ -1433,6 +1434,7 @@ function Persist-InstallState {
     Ensure-Directory -Path ([IO.Path]::GetDirectoryName($script:Context.StatePath))
     Save-JsonFile -Path $script:Context.StatePath -Object ([pscustomobject]$payload)
     $script:Context.State = [pscustomobject]$payload
+    Sync-WorkflowPackInstallRegistrySnapshot
 }
 
 function Resolve-ExistingPath {
@@ -1445,6 +1447,27 @@ function Resolve-ExistingPath {
     }
 
     return $null
+}
+
+
+function Sync-WorkflowPackInstallRegistrySnapshot {
+    $catalogPath = Resolve-ExistingPath -Candidates @(
+        ([Environment]::GetEnvironmentVariable('OPENCLAW_STORE_CATALOG_PATH')),
+        $(if (-not [string]::IsNullOrWhiteSpace($script:Context.SupportRoot)) { Join-Path $script:Context.SupportRoot 'openclaw-store-catalog.json' } else { $null }),
+        $(if (-not [string]::IsNullOrWhiteSpace($script:Context.DataRoot)) { Join-Path $script:Context.DataRoot 'support\openclaw-store-catalog.json' } else { $null })
+    )
+    $outputPath = Join-Path $script:Context.StoreReportsRoot 'install-registry.json'
+
+    try {
+        OpenClaw.WorkflowPack.Store\Sync-WorkflowPackInstallRegistry `
+            -OpenClawRoot $script:Context.DataRoot `
+            -StatePath $script:Context.StatePath `
+            -CatalogPath $catalogPath `
+            -OutputPath $outputPath | Out-Null
+        Write-Log -Level 'INFO' -Message ("Workflow pack install registry refreshed: {0}" -f $outputPath)
+    } catch {
+        Write-Log -Level 'WARN' -Message ("Workflow pack install registry refresh failed: {0}" -f $_.Exception.Message)
+    }
 }
 
 function Get-CommandResultSummary {
