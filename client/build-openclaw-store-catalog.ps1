@@ -14,22 +14,12 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+Import-Module (Join-Path $PSScriptRoot 'modules\OpenClaw.WorkflowPack.Common.psm1') -Force -DisableNameChecking
+
 function Write-Info($Message) { Write-Host "[INFO] $Message" -ForegroundColor Cyan }
 function Write-Ok($Message) { Write-Host "[OK] $Message" -ForegroundColor Green }
 function Write-Warn($Message) { Write-Host "[WARN] $Message" -ForegroundColor Yellow }
 function Write-Err($Message) { Write-Host "[ERROR] $Message" -ForegroundColor Red; throw $Message }
-
-function Ensure-Directory {
-    param([string]$Path)
-
-    if ([string]::IsNullOrWhiteSpace($Path)) {
-        return
-    }
-
-    if (-not (Test-Path -LiteralPath $Path)) {
-        New-Item -ItemType Directory -Path $Path -Force | Out-Null
-    }
-}
 
 function Save-JsonFile {
     param(
@@ -37,86 +27,11 @@ function Save-JsonFile {
         [object]$Object
     )
 
-    $json = $Object | ConvertTo-Json -Depth 32
-    [System.IO.File]::WriteAllText($Path, $json, (New-Object System.Text.UTF8Encoding($true)))
-}
-
-function Read-JsonFile {
-    param([string]$Path)
-
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        Write-Err ("JSON file was not found: {0}" -f $Path)
-    }
-
-    return (Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json)
-}
-
-function Convert-ToArray {
-    param([object]$Value)
-
-    if ($null -eq $Value) {
-        return @()
-    }
-
-    return @($Value)
-}
-
-function Get-ObjectPropertyValue {
-    param(
-        [object]$Object,
-        [string]$Name,
-        $Default = $null
-    )
-
-    if ($null -eq $Object) {
-        return $Default
-    }
-
-    $property = $Object.PSObject.Properties[$Name]
-    if ($null -eq $property) {
-        return $Default
-    }
-
-    if ($null -eq $property.Value) {
-        return $Default
-    }
-
-    return $property.Value
+    OpenClaw.WorkflowPack.Common\Save-JsonFile -Path $Path -Object $Object -Depth 32
 }
 
 function Get-RepoRoot {
     return (Split-Path -Path $PSScriptRoot -Parent)
-}
-
-function Get-RelativePath {
-    param(
-        [string]$Root,
-        [string]$Path
-    )
-
-    $rootUri = New-Object System.Uri(($Root.TrimEnd([char[]]@('/','\')) + [System.IO.Path]::DirectorySeparatorChar))
-    $pathUri = New-Object System.Uri($Path)
-    return ([System.Uri]::UnescapeDataString($rootUri.MakeRelativeUri($pathUri).ToString())).Replace('\', '/')
-}
-
-function Get-FileSha256 {
-    param([string]$Path)
-
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        Write-Err ("File was not found for hashing: {0}" -f $Path)
-    }
-
-    $sha = [System.Security.Cryptography.SHA256]::Create()
-    try {
-        $stream = [System.IO.File]::OpenRead($Path)
-        try {
-            return ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
-        } finally {
-            $stream.Dispose()
-        }
-    } finally {
-        $sha.Dispose()
-    }
 }
 
 function Assert-NonEmptyString {
@@ -682,10 +597,15 @@ $schema = Read-JsonFile -Path $schemaPath
 Validate-SchemaDocument -Schema $schema
 
 $definitions = @(Get-PackManifestDefinitions -RepoRoot $repoRoot)
+$requestedPackIds = @(
+    @($PackIds) |
+        Where-Object { -not [string]::IsNullOrWhiteSpace("$_") } |
+        ForEach-Object { "$_".Trim() }
+)
 $selectedDefinitions = @()
-if (@($PackIds).Count -gt 0) {
-    $selectedDefinitions = @($definitions | Where-Object { $_.PackId -in $PackIds } | Sort-Object PackId)
-    $missingPackIds = @($PackIds | Where-Object { $_ -notin @($selectedDefinitions | ForEach-Object { $_.PackId }) })
+if ($requestedPackIds.Count -gt 0) {
+    $selectedDefinitions = @($definitions | Where-Object { $_.PackId -in $requestedPackIds } | Sort-Object PackId)
+    $missingPackIds = @($requestedPackIds | Where-Object { $_ -notin @($selectedDefinitions | ForEach-Object { $_.PackId }) })
     if ($missingPackIds.Count -gt 0) {
         Write-Err ("Requested pack ids were not found: {0}" -f ($missingPackIds -join ', '))
     }
