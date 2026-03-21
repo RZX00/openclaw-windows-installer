@@ -24,6 +24,8 @@ try {
     Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
 } catch {}
 
+Import-Module (Join-Path $PSScriptRoot 'modules\OpenClaw.WorkflowPack.Installer.psm1') -Force -DisableNameChecking
+
 $script:Installer = [ordered]@{
     Locale = $Locale
     InvokerRoot = $null
@@ -571,47 +573,12 @@ function Get-WorkflowPackPluginIds {
     return @($pluginIds.ToArray())
 }
 
-function Get-WorkflowPackReadinessLabel {
-    param([string]$Status)
-
-    switch ("$Status") {
-        "ready" { return "Ready" }
-        "needs-setup" { return "Needs Setup" }
-        default { return "Needs Repair" }
-    }
-}
-
-function New-WorkflowPackDefaultReadiness {
-    param([string]$Summary = "Workflow pack verification did not complete.")
-
-    return [pscustomobject]@{
-        status                   = "needs-repair"
-        state                    = "Needs Repair"
-        summary                  = $Summary
-        unresolvedRequiredSkills = @()
-        integrityIssues          = @()
-        provisioningFailures     = @()
-        blockingPrerequisites    = @()
-        warningPrerequisites     = @()
-    }
-}
-
 function Get-WorkflowPackCurrentReadiness {
     if ($null -ne $script:Installer.Readiness) {
         return $script:Installer.Readiness
     }
 
     return (New-WorkflowPackDefaultReadiness -Summary "Workflow pack installation did not produce a readiness result.")
-}
-
-function Test-WorkflowPackOperationSuccess {
-    param([object]$Readiness = $null)
-
-    if ($null -eq $Readiness) {
-        $Readiness = Get-WorkflowPackCurrentReadiness
-    }
-
-    return ("$($Readiness.status)" -ne "needs-repair")
 }
 
 function New-WorkflowPackReportPaths {
@@ -1480,30 +1447,14 @@ function Update-WorkflowPackReadiness {
     $manualOutstanding = @($failedPrerequisites | Where-Object { $_.manual })
     $automatedFailures = @($failedPrerequisites | Where-Object { -not $_.manual })
 
-    $status = if ($requiredSourceFailures.Count -gt 0 -or $provisioningFailures.Count -gt 0 -or $automatedFailures.Count -gt 0 -or $integrityIssues.Count -gt 0) {
-        "needs-repair"
-    } elseif ($manualOutstanding.Count -gt 0) {
-        "needs-setup"
-    } else {
-        "ready"
-    }
-
-    $summary = switch ($status) {
-        "ready" { "Workflow pack is installed and ready." }
-        "needs-setup" { "Workflow pack payload is installed, but one or more manual setup steps are still required." }
-        default { "Workflow pack install completed, but verification found drift or missing assets that need repair." }
-    }
-
-    $script:Installer.Readiness = [pscustomobject]@{
-        status                   = $status
-        state                    = (Get-WorkflowPackReadinessLabel -Status $status)
-        summary                  = $summary
-        unresolvedRequiredSkills = @($requiredSourceFailures)
-        integrityIssues          = @($integrityIssues)
-        provisioningFailures     = @($provisioningFailures)
-        blockingPrerequisites    = @($blockingPrereqs)
-        warningPrerequisites     = @($warningPrereqs)
-    }
+    $script:Installer.Readiness = Get-WorkflowPackReadinessState `
+        -RequiredSourceFailures @($requiredSourceFailures) `
+        -ProvisioningResults @($script:Installer.Provisioning.ToArray()) `
+        -PrerequisiteResults @($script:Installer.Prerequisites.ToArray()) `
+        -IntegrityIssues @($integrityIssues) `
+        -ReadySummary 'Workflow pack is installed and ready.' `
+        -NeedsSetupSummary 'Workflow pack payload is installed, but one or more manual setup steps are still required.' `
+        -NeedsRepairSummary 'Workflow pack install completed, but verification found drift or missing assets that need repair.'
 }
 
 function Ensure-NoteProperty {

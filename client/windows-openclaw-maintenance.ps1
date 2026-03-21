@@ -10,6 +10,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+Import-Module (Join-Path $PSScriptRoot 'modules\OpenClaw.WorkflowPack.Installer.psm1') -Force -DisableNameChecking
+
 $script:ExitCodes = @{
     Success           = 0
     NeedsAttention    = 10
@@ -652,7 +654,6 @@ function Read-JsonFileSafe {
         return $null
     }
 }
-
 
 function Get-EmbeddedJsonCandidate {
     param([string]$Text)
@@ -1646,41 +1647,6 @@ function Get-WorkflowPackPluginIds {
     return @($pluginIds.ToArray())
 }
 
-function Get-WorkflowPackReadinessLabel {
-    param([string]$Status)
-
-    switch ("$Status") {
-        "ready" { return "Ready" }
-        "needs-setup" { return "Needs Setup" }
-        default { return "Needs Repair" }
-    }
-}
-
-function New-DefaultWorkflowPackReadiness {
-    param([string]$Summary = "Workflow pack verification did not complete.")
-
-    return [pscustomobject]@{
-        status                   = "needs-repair"
-        state                    = "Needs Repair"
-        summary                  = $Summary
-        unresolvedRequiredSkills = @()
-        integrityIssues          = @()
-        provisioningFailures     = @()
-        blockingPrerequisites    = @()
-        warningPrerequisites     = @()
-    }
-}
-
-function Test-WorkflowPackOperationSuccess {
-    param([object]$Readiness)
-
-    if ($null -eq $Readiness) {
-        return $false
-    }
-
-    return ("$($Readiness.status)" -ne "needs-repair")
-}
-
 function Get-WorkflowPackReportRoot {
     param([object]$WorkflowPack)
 
@@ -1873,49 +1839,6 @@ function Invoke-WorkflowPackPrerequisiteVerification {
     }
 
     return @($results.ToArray())
-}
-
-function Get-WorkflowPackReadinessState {
-    param(
-        [object[]]$RequiredSourceFailures,
-        [object[]]$ProvisioningResults,
-        [object[]]$PrerequisiteResults,
-        [object[]]$IntegrityIssues
-    )
-
-    $failedPrerequisites = @(@($PrerequisiteResults) | Where-Object { -not $_.success })
-    $blockingPrereqs = @($failedPrerequisites | Where-Object { $_.severity -eq "error" })
-    $warningPrereqs = @($failedPrerequisites | Where-Object { $_.severity -ne "error" })
-    $manualOutstanding = @($failedPrerequisites | Where-Object { $_.manual })
-    $automatedFailures = @($failedPrerequisites | Where-Object { -not $_.manual })
-    $provisioningFailures = @(@($ProvisioningResults) | Where-Object { -not $_.success })
-    $integrityItems = @($IntegrityIssues)
-    $requiredSourceItems = @($RequiredSourceFailures)
-
-    $status = if ($requiredSourceItems.Count -gt 0 -or $provisioningFailures.Count -gt 0 -or $automatedFailures.Count -gt 0 -or $integrityItems.Count -gt 0) {
-        "needs-repair"
-    } elseif ($manualOutstanding.Count -gt 0) {
-        "needs-setup"
-    } else {
-        "ready"
-    }
-
-    $summary = switch ($status) {
-        "ready" { "Workflow pack verification is healthy." }
-        "needs-setup" { "Workflow pack payload is present, but one or more manual setup steps are still required." }
-        default { "Workflow pack verification found drift or missing assets that need repair." }
-    }
-
-    return [pscustomobject]@{
-        status                   = $status
-        state                    = (Get-WorkflowPackReadinessLabel -Status $status)
-        summary                  = $summary
-        unresolvedRequiredSkills = @($requiredSourceItems)
-        integrityIssues          = @($integrityItems)
-        provisioningFailures     = @($provisioningFailures)
-        blockingPrerequisites    = @($blockingPrereqs)
-        warningPrerequisites     = @($warningPrereqs)
-    }
 }
 
 function Resolve-InstalledWorkflowPacks {
@@ -2168,7 +2091,7 @@ function Invoke-WorkflowPackVerification {
             Success                     = $false
             Summary                     = "Workflow pack plugin id is missing."
             RepairAllowed               = $false
-            Readiness                   = (New-DefaultWorkflowPackReadiness -Summary "Workflow pack plugin id is missing.")
+            Readiness                   = (New-WorkflowPackDefaultReadiness -Summary "Workflow pack plugin id is missing.")
             Provisioning                = @()
             Prerequisites               = @()
             ObservedBuildMetadataSha256 = $null
@@ -2219,7 +2142,10 @@ function Invoke-WorkflowPackVerification {
         -RequiredSourceFailures @($sourceLockVerification.RequiredSourceFailures) `
         -ProvisioningResults @($provisioningResults) `
         -PrerequisiteResults @($prerequisiteResults) `
-        -IntegrityIssues @($integrityIssues)
+        -IntegrityIssues @($integrityIssues) `
+        -ReadySummary 'Workflow pack verification is healthy.' `
+        -NeedsSetupSummary 'Workflow pack payload is present, but one or more manual setup steps are still required.' `
+        -NeedsRepairSummary 'Workflow pack verification found drift or missing assets that need repair.'
 
     $failedChecks = @(@($checks.ToArray()) | Where-Object { -not $_.success })
     $repairBlockedChecks = @($failedChecks | Where-Object { -not $_.repairable })
@@ -2303,7 +2229,7 @@ function Write-WorkflowPackStoreReport {
     $readiness = if ($null -ne $Verification -and $null -ne $Verification.Readiness) {
         $Verification.Readiness
     } else {
-        New-DefaultWorkflowPackReadiness -Summary "Workflow pack verification did not produce a readiness result."
+        New-WorkflowPackDefaultReadiness -Summary "Workflow pack verification did not produce a readiness result."
     }
     $summary = if ($null -ne $Verification -and -not [string]::IsNullOrWhiteSpace("$($Verification.Summary)")) {
         "$($Verification.Summary)"
@@ -2375,7 +2301,7 @@ function New-WorkflowPackStateSnapshot {
     $readiness = if ($null -ne $Verification -and $null -ne $Verification.Readiness) {
         $Verification.Readiness
     } else {
-        New-DefaultWorkflowPackReadiness -Summary "Workflow pack verification did not complete."
+        New-WorkflowPackDefaultReadiness -Summary "Workflow pack verification did not complete."
     }
     $reportRoot = if ($null -ne $ReportInfo -and -not [string]::IsNullOrWhiteSpace("$($ReportInfo.reportRoot)")) {
         "$($ReportInfo.reportRoot)"
