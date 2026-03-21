@@ -106,6 +106,40 @@ function Compile-CSharpExecutable {
     }
 }
 
+function Get-ReleaseLauncherSupportDefinitions {
+    return @(
+        [pscustomobject]@{ FileName = "OpenClaw-Maintenance.ps1"; SourcePath = (Join-Path $repoRoot "client\windows-openclaw-maintenance.ps1") },
+        [pscustomobject]@{ FileName = "install-windows-core.ps1"; SourcePath = (Join-Path $repoRoot "client\install-windows-core.ps1") }
+    )
+}
+
+function Publish-ReleaseLauncherSupportAssets {
+    param([string]$OutputDir)
+
+    $supportDir = Join-Path $OutputDir 'support'
+    if (Test-Path -LiteralPath $supportDir) {
+        Remove-Item -LiteralPath $supportDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Ensure-Directory -Path $supportDir
+
+    $outputs = @()
+    foreach ($definition in (Get-ReleaseLauncherSupportDefinitions)) {
+        if (-not (Test-Path -LiteralPath $definition.SourcePath)) {
+            throw "Launcher support asset was not found: $($definition.SourcePath)"
+        }
+
+        $outputPath = Join-Path $supportDir $definition.FileName
+        Copy-Item -LiteralPath $definition.SourcePath -Destination $outputPath -Force
+        if (-not (Test-Path -LiteralPath $outputPath)) {
+            throw "Launcher support asset was not produced: $outputPath"
+        }
+
+        $outputs += $outputPath
+    }
+
+    return $outputs
+}
+
 function Build-ReleaseLaunchers {
     param(
         [string]$OutputDir,
@@ -262,6 +296,7 @@ foreach ($definition in $workflowPackDefinitions) {
 }
 
 $launcherPaths = Build-ReleaseLaunchers -OutputDir $OutputDir -Locale $Locale
+$launcherSupportPaths = Publish-ReleaseLauncherSupportAssets -OutputDir $OutputDir
 
 $storeChannel = if ($Channel -eq 'beta') { 'beta' } else { 'official' }
 & $catalogBuilderScript `
@@ -287,6 +322,9 @@ foreach ($output in @($workflowPackOutputs.ToArray())) {
 }
 foreach ($launcherPath in $launcherPaths) {
     Write-Host ("[OK] Launcher asset: {0}" -f $launcherPath)
+}
+foreach ($launcherSupportPath in $launcherSupportPaths) {
+    Write-Host ("[OK] Launcher support asset: {0}" -f $launcherSupportPath)
 }
 Write-Host ("[OK] Store catalog: {0}" -f $catalogFilePath)
 Write-Host ("[OK] Store item metadata directory: {0}" -f $storeItemsDir)

@@ -46,6 +46,7 @@ internal static class Program
             }
 
             string logPath = CreateLogPath(mode, installRoot);
+            TryRefreshInstalledSupportAssets(installRoot, locale, logPath);
             string supportScriptPath = ResolveSupportScriptPath(installRoot, statePath);
             string runtimeControlMode = ResolveRuntimeControlMode(statePath);
             bool enforceLicenseGate = false;
@@ -327,6 +328,124 @@ internal static class Program
 
         string commonAppData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
         return Path.Combine(commonAppData, "OpenClaw");
+    }
+
+    private static string GetBundledSupportPayloadRoot()
+    {
+        try
+        {
+            string exeDir = AppDomain.CurrentDomain.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);
+            string candidate = Path.Combine(exeDir, "support");
+            return Directory.Exists(candidate) ? candidate : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static bool FilesAreIdentical(string firstPath, string secondPath)
+    {
+        try
+        {
+            if (!File.Exists(firstPath) || !File.Exists(secondPath))
+            {
+                return false;
+            }
+
+            FileInfo first = new FileInfo(firstPath);
+            FileInfo second = new FileInfo(secondPath);
+            if (first.Length != second.Length)
+            {
+                return false;
+            }
+
+            return File.ReadAllBytes(firstPath).SequenceEqual(File.ReadAllBytes(secondPath));
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static void TryRefreshInstalledSupportAssets(string installRoot, string locale, string logPath)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(installRoot))
+            {
+                return;
+            }
+
+            string payloadRoot = GetBundledSupportPayloadRoot();
+            if (string.IsNullOrWhiteSpace(payloadRoot))
+            {
+                return;
+            }
+
+            string targetRoot = Path.Combine(installRoot, "support");
+            string normalizedPayloadRoot = Path.GetFullPath(payloadRoot).TrimEnd(Path.DirectorySeparatorChar);
+            string normalizedTargetRoot = Path.GetFullPath(targetRoot).TrimEnd(Path.DirectorySeparatorChar);
+            if (string.Equals(normalizedPayloadRoot, normalizedTargetRoot, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            string[] fileNames =
+            {
+                "OpenClaw-Maintenance.ps1",
+                "install-windows-core.ps1"
+            };
+
+            bool payloadFound = false;
+            foreach (string fileName in fileNames)
+            {
+                if (File.Exists(Path.Combine(payloadRoot, fileName)))
+                {
+                    payloadFound = true;
+                    break;
+                }
+            }
+
+            if (!payloadFound)
+            {
+                return;
+            }
+
+            Directory.CreateDirectory(targetRoot);
+            List<string> refreshedFiles = new List<string>();
+            foreach (string fileName in fileNames)
+            {
+                string sourcePath = Path.Combine(payloadRoot, fileName);
+                if (!File.Exists(sourcePath))
+                {
+                    continue;
+                }
+
+                string targetPath = Path.Combine(targetRoot, fileName);
+                if (string.Equals(Path.GetFullPath(sourcePath), Path.GetFullPath(targetPath), StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (File.Exists(targetPath) && FilesAreIdentical(sourcePath, targetPath))
+                {
+                    continue;
+                }
+
+                File.Copy(sourcePath, targetPath, true);
+                refreshedFiles.Add(fileName);
+            }
+
+            if (refreshedFiles.Count > 0)
+            {
+                Log(logPath, T(locale, "已刷新支持脚本：", "Refreshed support assets: ") + string.Join(", ", refreshedFiles));
+            }
+        }
+        catch (Exception ex)
+        {
+            Log(logPath, T(locale, "刷新支持脚本失败：", "Failed to refresh support assets: ") + ex.Message);
+        }
     }
 
     private static string ResolveStatePath(string installRoot)
