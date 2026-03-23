@@ -17,6 +17,30 @@
 
 拒绝一切环境和网络问题！100%成功一键安装！是个 win 就能装！
 
+## 平台关系
+
+这个仓库不是孤立项目，而是当前 OpenClaw 平台的安装与发布权威。
+
+```text
+OpenClaw Platform
+├─ /mnt/e/app/openclaw-setup-cn
+│  ├─ Windows 安装器 / workflow-pack / release assets
+│  └─ catalog / install-registry / maintenance authority
+└─ /mnt/e/app/aip
+   ├─ 桌面端产品壳层
+   ├─ 支付 / entitlement / store UI
+   └─ 消费这里产出的官方 release 与本地安装状态
+```
+
+两边当前通过这些机器可读契约联通：
+
+- `release/openclaw-store-catalog.json`
+- `release/store-items/*.json`
+- `%ProgramData%/OpenClaw/reports/store/install-registry.json`
+- workflow-pack installer/report contracts
+
+如果任务涉及桌面商店、支付后安装、ownership、已安装状态或 Tauri 调度，不要只看本仓库，必须同时检查 `/mnt/e/app/aip`。
+
 ## One-click Start Model
 
 `OpenClaw-Start.exe` is now defined as a **local-host startup path**:
