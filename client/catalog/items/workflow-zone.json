@@ -1,0 +1,27 @@
+{
+  "description": "OpenClaw official starter workflow capability pack preserved for backward compatibility while the super store rolls forward.",
+  "screenshots": [],
+  "market": {
+    "publisherId": "openclaw-official",
+    "publisherVerified": true,
+    "itemKind": "capability-pack",
+    "fulfillmentStrategy": "local-install-pack",
+    "trustLane": "official",
+    "compatibilityClass": "openclaw-local",
+    "pricingModel": "free",
+    "priceCredits": 0,
+    "billingBehavior": "none",
+    "entitlementKind": "none",
+    "ownershipScope": "workspace",
+    "deliveryMode": "downloadable",
+    "cachePolicy": "versioned",
+    "provisioningProfile": "workflow-zone-provisioning-v1",
+    "verificationProfile": "workflow-zone-readiness-v1",
+    "repairProfile": "workflow-zone-repair-v1",
+    "includedItemIds": [],
+    "secretScope": "none",
+    "connectorScope": "none",
+    "managedRouteProfile": "none",
+    "remotePrerequisites": []
+  }
+}

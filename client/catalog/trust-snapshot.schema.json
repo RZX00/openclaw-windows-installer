@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openclaw.local/schemas/trust-snapshot.schema.json",
+  "title": "OpenClaw Market Trust Snapshot",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "generatedAt",
+    "items",
+    "metadata"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/item"
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generator", "sourceRepo", "schemaVersion"],
+      "properties": {
+        "generator": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceRepo": {
+          "type": "string",
+          "minLength": 1
+        },
+        "schemaVersion": {
+          "type": "integer",
+          "const": 1
+        }
+      }
+    }
+  },
+  "$defs": {
+    "item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "itemId",
+        "slug",
+        "version",
+        "publisherId",
+        "publisherDisplayName",
+        "trustLane",
+        "releaseChannel",
+        "auditStatus",
+        "auditSummary",
+        "sourcePinned",
+        "releaseBlocked"
+      ],
+      "properties": {
+        "itemId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "slug": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "publisherId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "publisherDisplayName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "trustLane": {
+          "type": "string",
+          "enum": ["official", "verified-community", "community", "local-import"]
+        },
+        "releaseChannel": {
+          "type": "string",
+          "enum": ["official", "beta", "local"]
+        },
+        "auditStatus": {
+          "type": "string",
+          "enum": ["passed", "warning", "blocked"]
+        },
+        "auditSummary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourcePinned": {
+          "type": "boolean"
+        },
+        "releaseBlocked": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

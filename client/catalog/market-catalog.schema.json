@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openclaw.local/schemas/market-catalog.schema.json",
+  "title": "OpenClaw Market Catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "catalogVersion",
+    "generatedAt",
+    "publisher",
+    "channel",
+    "items",
+    "collections",
+    "metadata"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "catalogVersion": {
+      "type": "string",
+      "minLength": 1
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "publisher": {
+      "type": "string",
+      "minLength": 1
+    },
+    "channel": {
+      "type": "string",
+      "enum": ["official", "beta", "local"]
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "$ref": "../../docs/contracts/market-item.schema.json"
+      }
+    },
+    "collections": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/collection"
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generator", "sourceRepo", "schemaVersion"],
+      "properties": {
+        "generator": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceRepo": {
+          "type": "string",
+          "minLength": 1
+        },
+        "schemaVersion": {
+          "type": "integer",
+          "const": 1
+        }
+      }
+    }
+  },
+  "$defs": {
+    "collection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "summary", "itemIds"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "itemIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  }
+}

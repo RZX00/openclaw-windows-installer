@@ -207,6 +207,7 @@ $repoRoot = Split-Path -Path $PSScriptRoot -Parent
 $buildScript = Join-Path $repoRoot "client\build-windows-oneclick-installer.ps1"
 $workflowPackBuilderScript = Join-Path $repoRoot "client\build-windows-workflow-pack-installer.ps1"
 $catalogBuilderScript = Join-Path $repoRoot "client\build-openclaw-store-catalog.ps1"
+$marketCatalogBuilderScript = Join-Path $repoRoot "client\build-openclaw-market-catalog.ps1"
 if (-not (Test-Path -LiteralPath $buildScript)) {
     throw "Build script was not found: $buildScript"
 }
@@ -215,6 +216,9 @@ if (-not (Test-Path -LiteralPath $workflowPackBuilderScript)) {
 }
 if (-not (Test-Path -LiteralPath $catalogBuilderScript)) {
     throw "Catalog build script was not found: $catalogBuilderScript"
+}
+if (-not (Test-Path -LiteralPath $marketCatalogBuilderScript)) {
+    throw "Market catalog build script was not found: $marketCatalogBuilderScript"
 }
 
 $selectedPackIds = @(Get-WorkflowPackIdsForRelease)
@@ -234,6 +238,10 @@ $baseFileName = "$baseName.exe"
 $baseFilePath = Join-Path $OutputDir $baseFileName
 $catalogFilePath = Join-Path $OutputDir 'openclaw-store-catalog.json'
 $storeItemsDir = Join-Path $OutputDir 'store-items'
+$marketCatalogFilePath = Join-Path $OutputDir 'openclaw-market-catalog.json'
+$marketItemsDir = Join-Path $OutputDir 'store-items-vnext'
+$artifactIndexFilePath = Join-Path $OutputDir 'openclaw-market-artifact-index.json'
+$trustSnapshotFilePath = Join-Path $OutputDir 'openclaw-market-trust-snapshot.json'
 
 Get-ChildItem -LiteralPath $OutputDir -File -ErrorAction SilentlyContinue |
     Where-Object {
@@ -247,6 +255,9 @@ Get-ChildItem -LiteralPath $OutputDir -File -ErrorAction SilentlyContinue |
         $_.Name -like "workflow-pack-build-metadata-*.json" -or
         $_.Name -like "workflow-pack-source-lock-*.json" -or
         $_.Name -eq 'openclaw-store-catalog.json' -or
+        $_.Name -eq 'openclaw-market-catalog.json' -or
+        $_.Name -eq 'openclaw-market-artifact-index.json' -or
+        $_.Name -eq 'openclaw-market-trust-snapshot.json' -or
         $_.Name -like "$baseName*.sha256" -or
         $_.Name -eq 'release-manifest.json'
     } |
@@ -254,6 +265,9 @@ Get-ChildItem -LiteralPath $OutputDir -File -ErrorAction SilentlyContinue |
 
 if (Test-Path -LiteralPath $storeItemsDir) {
     Remove-Item -LiteralPath $storeItemsDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+if (Test-Path -LiteralPath $marketItemsDir) {
+    Remove-Item -LiteralPath $marketItemsDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 & $buildScript `
@@ -299,12 +313,13 @@ $launcherPaths = Build-ReleaseLaunchers -OutputDir $OutputDir -Locale $Locale
 $launcherSupportPaths = Publish-ReleaseLauncherSupportAssets -OutputDir $OutputDir
 
 $storeChannel = if ($Channel -eq 'beta') { 'beta' } else { 'official' }
+$resolvedCatalogVersion = if ([string]::IsNullOrWhiteSpace($ReleaseTag)) { '0.1.0' } else { $ReleaseTag.TrimStart('v') }
 & $catalogBuilderScript `
     -ReleaseDir $OutputDir `
     -OutputCatalogPath $catalogFilePath `
     -OutputItemsDir $storeItemsDir `
     -PackIds $selectedPackIds `
-    -CatalogVersion $(if ([string]::IsNullOrWhiteSpace($ReleaseTag)) { '0.1.0' } else { $ReleaseTag.TrimStart('v') }) `
+    -CatalogVersion $resolvedCatalogVersion `
     -Channel $storeChannel `
     -AllowReleaseBlockedItems:$AllowReleaseBlockedCatalogItems
 
@@ -313,6 +328,30 @@ if (-not (Test-Path -LiteralPath $catalogFilePath)) {
 }
 if (-not (Test-Path -LiteralPath $storeItemsDir -PathType Container)) {
     throw "Store item metadata directory was not produced: $storeItemsDir"
+}
+
+& $marketCatalogBuilderScript `
+    -ReleaseDir $OutputDir `
+    -OutputCatalogPath $marketCatalogFilePath `
+    -OutputItemsDir $marketItemsDir `
+    -OutputArtifactIndexPath $artifactIndexFilePath `
+    -OutputTrustSnapshotPath $trustSnapshotFilePath `
+    -PackIds $selectedPackIds `
+    -CatalogVersion $resolvedCatalogVersion `
+    -Channel $storeChannel `
+    -AllowReleaseBlockedItems:$AllowReleaseBlockedCatalogItems
+
+if (-not (Test-Path -LiteralPath $marketCatalogFilePath)) {
+    throw "Market catalog asset was not produced: $marketCatalogFilePath"
+}
+if (-not (Test-Path -LiteralPath $marketItemsDir -PathType Container)) {
+    throw "Market item metadata directory was not produced: $marketItemsDir"
+}
+if (-not (Test-Path -LiteralPath $artifactIndexFilePath)) {
+    throw "Market artifact index asset was not produced: $artifactIndexFilePath"
+}
+if (-not (Test-Path -LiteralPath $trustSnapshotFilePath)) {
+    throw "Market trust snapshot asset was not produced: $trustSnapshotFilePath"
 }
 
 Write-Host ("[OK] Release asset: {0}" -f $baseFilePath)
@@ -328,3 +367,7 @@ foreach ($launcherSupportPath in $launcherSupportPaths) {
 }
 Write-Host ("[OK] Store catalog: {0}" -f $catalogFilePath)
 Write-Host ("[OK] Store item metadata directory: {0}" -f $storeItemsDir)
+Write-Host ("[OK] Market catalog: {0}" -f $marketCatalogFilePath)
+Write-Host ("[OK] Market item metadata directory: {0}" -f $marketItemsDir)
+Write-Host ("[OK] Market artifact index: {0}" -f $artifactIndexFilePath)
+Write-Host ("[OK] Market trust snapshot: {0}" -f $trustSnapshotFilePath)

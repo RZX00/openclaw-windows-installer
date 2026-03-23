@@ -157,14 +157,20 @@ Outputs
 
 ```ascii
 openclaw-setup-cn
-├─ client/workflow-packs/*
-├─ client/build-windows-workflow-pack.ps1
-├─ client/build-windows-workflow-pack-installer.ps1
+├─ client/build-openclaw-market-catalog.ps1
 ├─ client/build-openclaw-store-catalog.ps1
-├─ client/modules/OpenClaw.WorkflowPack.*.psm1
+├─ client/catalog/market-catalog.schema.json
+├─ client/catalog/artifact-index.schema.json
+├─ client/catalog/trust-snapshot.schema.json
+├─ client/catalog/items/foundation-common.json
+├─ client/catalog/items/workflow-zone.json
+├─ scripts/build-release-assets.ps1
 ├─ release/openclaw-store-catalog.json
 ├─ release/store-items/*
-├─ release/artifacts/*
+├─ release/openclaw-market-catalog.json
+├─ release/store-items-vnext/*
+├─ release/openclaw-market-artifact-index.json
+├─ release/openclaw-market-trust-snapshot.json
 └─ docs/contracts/catalog-publish-contract.md
 ```
 

@@ -1,11 +1,15 @@
 # OpenClaw Store Catalog Assets
 
 This directory stores the curated catalog inputs used by
-`client/build-openclaw-store-catalog.ps1`.
+`client/build-openclaw-store-catalog.ps1` and
+`client/build-openclaw-market-catalog.ps1`.
 
 ```text
 client/catalog/
 +-- catalog.schema.json
++-- market-catalog.schema.json
++-- artifact-index.schema.json
++-- trust-snapshot.schema.json
 +-- items/
 |   +-- <item-id>.json
 +-- collections/
@@ -15,7 +19,13 @@ client/catalog/
 ## Asset Roles
 
 - `catalog.schema.json`
-  - freezes the machine-readable catalog payload consumed by desktop
+  - freezes the legacy machine-readable catalog payload consumed by the current desktop shell
+- `market-catalog.schema.json`
+  - freezes the vNext market catalog payload for the fulfillment engine and future desktop shell
+- `artifact-index.schema.json`
+  - freezes the vNext artifact addressing payload keyed by artifact id + sha256
+- `trust-snapshot.schema.json`
+  - freezes the vNext publish-time trust summary for each item
 - `items/*.json`
   - per-item override metadata layered on top of workflow-pack manifests
 - `collections/*.json`
@@ -26,11 +36,19 @@ client/catalog/
 ```mermaid
 flowchart LR
     A["workflow-packs/*/pack-manifest.json"] --> B["build-openclaw-store-catalog.ps1"]
-    C["client/catalog/items/*.json"] --> B
-    D["client/catalog/collections/*.json"] --> B
-    E["release installers + archives + metadata"] --> B
-    B --> F["release/openclaw-store-catalog.json"]
-    B --> G["release/store-items/*.json"]
+    A --> C["build-openclaw-market-catalog.ps1"]
+    D["client/catalog/items/*.json"] --> B
+    D --> C
+    E["client/catalog/collections/*.json"] --> B
+    E --> C
+    F["release installers + archives + metadata"] --> B
+    F --> C
+    B --> G["release/openclaw-store-catalog.json"]
+    B --> H["release/store-items/*.json"]
+    C --> I["release/openclaw-market-catalog.json"]
+    C --> J["release/store-items-vnext/*.json"]
+    C --> K["release/openclaw-market-artifact-index.json"]
+    C --> L["release/openclaw-market-trust-snapshot.json"]
 ```
 
 ## Collection Behavior
@@ -43,18 +61,20 @@ multi-pack releases without duplicating collection logic.
 
 ## Release Outputs
 
-The release pipeline should now be understood as producing these store-facing
-artifacts together:
+The release pipeline now produces both legacy and vNext store-facing artifacts:
 
 ```text
 installers
 archives
 build metadata
 source locks
-store item metadata
-store catalog metadata
+legacy store item metadata
+legacy store catalog metadata
+vNext market item metadata
+vNext market catalog metadata
+market artifact index
+market trust snapshot
 ```
-
 
 ## Local Install Registry
 
@@ -83,6 +103,12 @@ Registry purpose:
 Contract files:
 
 - `client/catalog/catalog.schema.json`
-  - release catalog contract
+  - legacy release catalog contract
+- `client/catalog/market-catalog.schema.json`
+  - vNext market catalog contract
+- `client/catalog/artifact-index.schema.json`
+  - vNext artifact addressing contract
+- `client/catalog/trust-snapshot.schema.json`
+  - vNext trust publish contract
 - `client/catalog/install-registry.schema.json`
   - local install-registry contract

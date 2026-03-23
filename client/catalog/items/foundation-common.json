@@ -1,6 +1,29 @@
 {
   "description": "OpenClaw official foundation capability pack that bundles the shared runtime, curated baseline skills, readiness checks, and repair metadata for desktop installation.",
   "screenshots": [],
+  "market": {
+    "publisherId": "openclaw-official",
+    "publisherVerified": true,
+    "itemKind": "capability-pack",
+    "fulfillmentStrategy": "local-install-pack",
+    "trustLane": "official",
+    "compatibilityClass": "openclaw-local",
+    "pricingModel": "free",
+    "priceCredits": 0,
+    "billingBehavior": "none",
+    "entitlementKind": "none",
+    "ownershipScope": "workspace",
+    "deliveryMode": "downloadable",
+    "cachePolicy": "versioned",
+    "provisioningProfile": "foundation-common-provisioning-v1",
+    "verificationProfile": "foundation-common-readiness-v1",
+    "repairProfile": "foundation-common-repair-v1",
+    "includedItemIds": [],
+    "secretScope": "none",
+    "connectorScope": "none",
+    "managedRouteProfile": "none",
+    "remotePrerequisites": []
+  },
   "verification": {
     "checks": [
       {

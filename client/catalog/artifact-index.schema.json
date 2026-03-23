@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openclaw.local/schemas/market-artifact-index.schema.json",
+  "title": "OpenClaw Market Artifact Index",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "generatedAt",
+    "artifacts",
+    "metadata"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/artifact"
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generator", "sourceRepo", "schemaVersion"],
+      "properties": {
+        "generator": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceRepo": {
+          "type": "string",
+          "minLength": 1
+        },
+        "schemaVersion": {
+          "type": "integer",
+          "const": 1
+        }
+      }
+    }
+  },
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifactId",
+        "itemId",
+        "itemVersion",
+        "kind",
+        "relativePath",
+        "fileName",
+        "sha256",
+        "sizeBytes",
+        "required",
+        "deliveryMode",
+        "trustLane",
+        "releaseBlocked"
+      ],
+      "properties": {
+        "artifactId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "itemId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "itemVersion": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "relativePath": {
+          "type": "string",
+          "minLength": 1
+        },
+        "fileName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "deliveryMode": {
+          "type": "string",
+          "enum": ["bundled", "downloadable", "remote-managed", "hybrid"]
+        },
+        "trustLane": {
+          "type": "string",
+          "enum": ["official", "verified-community", "community", "local-import"]
+        },
+        "releaseBlocked": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}
