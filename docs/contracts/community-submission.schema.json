@@ -1,0 +1,353 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openclaw.local/schemas/community-submission.schema.json",
+  "title": "OpenClaw Community Submission",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "submissionId",
+    "slug",
+    "publisher",
+    "source",
+    "requestedTrustLane",
+    "submissionState",
+    "review",
+    "visibility",
+    "moderationFlags",
+    "policyFlags",
+    "artifacts",
+    "createdAt",
+    "updatedAt"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "submissionId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "itemId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "slug": {
+      "type": "string",
+      "minLength": 1
+    },
+    "publisher": {
+      "$ref": "#/$defs/publisher"
+    },
+    "source": {
+      "$ref": "#/$defs/source"
+    },
+    "requestedTrustLane": {
+      "$ref": "#/$defs/trustLane"
+    },
+    "currentTrustLane": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/trustLane"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "submissionState": {
+      "$ref": "#/$defs/submissionState"
+    },
+    "review": {
+      "$ref": "#/$defs/review"
+    },
+    "visibility": {
+      "$ref": "#/$defs/visibility"
+    },
+    "moderationFlags": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/moderationFlag"
+      }
+    },
+    "policyFlags": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "artifacts": {
+      "$ref": "#/$defs/artifacts"
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "submittedAt": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "publishedAt": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    }
+  },
+  "$defs": {
+    "trustLane": {
+      "type": "string",
+      "enum": [
+        "official",
+        "verified-community",
+        "community",
+        "local-import"
+      ]
+    },
+    "submissionState": {
+      "type": "string",
+      "enum": [
+        "draft",
+        "submitted",
+        "under-review",
+        "changes-requested",
+        "approved",
+        "published",
+        "rejected",
+        "withdrawn"
+      ]
+    },
+    "reviewState": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "assigned",
+        "in-review",
+        "decision-recorded",
+        "publish-ready"
+      ]
+    },
+    "reviewDecision": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "approve",
+        "request-changes",
+        "reject",
+        "publish"
+      ]
+    },
+    "catalogExposure": {
+      "type": "string",
+      "enum": [
+        "public",
+        "feature-flagged",
+        "admin-only",
+        "hidden"
+      ]
+    },
+    "publisher": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "publisherId",
+        "displayName",
+        "verified"
+      ],
+      "properties": {
+        "publisherId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "contactEmail": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "email"
+        },
+        "verified": {
+          "type": "boolean"
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repositoryUrl",
+        "sourceRef",
+        "manifestPath"
+      ],
+      "properties": {
+        "repositoryUrl": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceRef": {
+          "type": "string",
+          "minLength": 1
+        },
+        "manifestPath": {
+          "type": "string",
+          "minLength": 1
+        },
+        "artifactHints": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "decision"
+      ],
+      "properties": {
+        "state": {
+          "$ref": "#/$defs/reviewState"
+        },
+        "decision": {
+          "$ref": "#/$defs/reviewDecision"
+        },
+        "assignedReviewerId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "signedBy": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "verifiedBy": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lastReviewedAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "notes": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "visibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "catalogExposure"
+      ],
+      "properties": {
+        "catalogExposure": {
+          "$ref": "#/$defs/catalogExposure"
+        },
+        "exposureFlag": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "moderationFlag": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "severity",
+        "blocking",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1
+        },
+        "severity": {
+          "type": "string",
+          "enum": [
+            "info",
+            "warning",
+            "blocking"
+          ]
+        },
+        "blocking": {
+          "type": "boolean"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "releaseArtifactIds"
+      ],
+      "properties": {
+        "manifestPath": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sourceLockPath": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "buildMetadataPath": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "releaseArtifactIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        }
+      }
+    }
+  }
+}

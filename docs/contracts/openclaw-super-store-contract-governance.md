@@ -112,11 +112,13 @@ Frozen vocabulary families
 ├─ item kinds
 ├─ fulfillment strategies
 ├─ trust lanes
+├─ trust lane exposure states
 ├─ delivery modes
 ├─ wallet ledger directions / reasons / statuses
 ├─ entitlement kinds / statuses
 ├─ fulfillment job actions / states
-└─ local install registry lanes / readiness ids / remote secret states
+├─ local install registry lanes / readiness ids / remote secret states
+└─ community submission states / review states / review decisions
 ```
 
 ## Source Ownership By Domain
@@ -140,3 +142,18 @@ Ownership map
 No later stage may introduce a new top-level contract name, state family, or
 enum family unless Stage 0 is explicitly amended first.
 ```
+
+
+## Stage 5 Authorized Extension
+
+Stage 5 explicitly amends the contract surface with the following extension:
+
+```ascii
+Stage 5 extension
+├─ community_submission
+├─ trust_lane_policy exposure fields
+└─ verified-community promotion metadata
+```
+
+This extension is allowed because Stage 5 requires a review and publish workflow.
+Any later change to these families still follows the same cross-repo update rule.

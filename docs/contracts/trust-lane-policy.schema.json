@@ -31,7 +31,12 @@
         "auditRequired",
         "remoteSecretsAllowed",
         "defaultInstallPermission",
-        "uiBadge"
+        "uiBadge",
+        "submissionEnabled",
+        "reviewRequired",
+        "publishApprovalRequired",
+        "catalogExposure",
+        "promotionSources"
       ],
       "properties": {
         "id": {
@@ -67,6 +72,43 @@
         "uiBadge": {
           "type": "string",
           "minLength": 1
+        },
+        "submissionEnabled": {
+          "type": "boolean"
+        },
+        "reviewRequired": {
+          "type": "boolean"
+        },
+        "publishApprovalRequired": {
+          "type": "boolean"
+        },
+        "catalogExposure": {
+          "type": "string",
+          "enum": [
+            "public",
+            "feature-flagged",
+            "admin-only",
+            "hidden"
+          ]
+        },
+        "exposureFlag": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "promotionSources": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "official",
+              "verified-community",
+              "community",
+              "local-import"
+            ]
+          },
+          "uniqueItems": true
         }
       }
     }
