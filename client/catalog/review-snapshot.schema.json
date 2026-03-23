@@ -1,0 +1,285 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openclaw.local/schemas/review-snapshot.schema.json",
+  "title": "OpenClaw Market Review Snapshot",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "generatedAt",
+    "trustLanePolicy",
+    "items",
+    "metadata"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "trustLanePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "relativePath",
+        "sha256"
+      ],
+      "properties": {
+        "relativePath": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/item"
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "generator",
+        "sourceRepo",
+        "schemaVersion"
+      ],
+      "properties": {
+        "generator": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceRepo": {
+          "type": "string",
+          "minLength": 1
+        },
+        "schemaVersion": {
+          "type": "integer",
+          "const": 1
+        }
+      }
+    }
+  },
+  "$defs": {
+    "nullableString": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "trustLane": {
+      "type": "string",
+      "enum": [
+        "official",
+        "verified-community",
+        "community",
+        "local-import"
+      ]
+    },
+    "submissionState": {
+      "type": "string",
+      "enum": [
+        "draft",
+        "submitted",
+        "under-review",
+        "changes-requested",
+        "approved",
+        "published",
+        "rejected",
+        "withdrawn"
+      ]
+    },
+    "reviewState": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "assigned",
+        "in-review",
+        "decision-recorded",
+        "publish-ready"
+      ]
+    },
+    "reviewDecision": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "approve",
+        "request-changes",
+        "reject",
+        "publish"
+      ]
+    },
+    "catalogExposure": {
+      "type": "string",
+      "enum": [
+        "public",
+        "feature-flagged",
+        "admin-only",
+        "hidden"
+      ]
+    },
+    "moderationFlag": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "severity",
+        "blocking",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1
+        },
+        "severity": {
+          "type": "string",
+          "enum": [
+            "info",
+            "warning",
+            "blocking"
+          ]
+        },
+        "blocking": {
+          "type": "boolean"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "itemId",
+        "slug",
+        "version",
+        "publisherId",
+        "publisherDisplayName",
+        "requestedTrustLane",
+        "currentTrustLane",
+        "submissionState",
+        "reviewState",
+        "reviewDecision",
+        "assignedReviewerId",
+        "signedBy",
+        "verifiedBy",
+        "lastReviewedAt",
+        "notes",
+        "catalogExposure",
+        "exposureFlag",
+        "moderationFlags",
+        "policyFlags",
+        "submissionEnabled",
+        "reviewRequired",
+        "publishApprovalRequired",
+        "promotionSources"
+      ],
+      "properties": {
+        "itemId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "slug": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "publisherId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "publisherDisplayName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "requestedTrustLane": {
+          "$ref": "#/$defs/trustLane"
+        },
+        "currentTrustLane": {
+          "$ref": "#/$defs/trustLane"
+        },
+        "submissionState": {
+          "$ref": "#/$defs/submissionState"
+        },
+        "reviewState": {
+          "$ref": "#/$defs/reviewState"
+        },
+        "reviewDecision": {
+          "$ref": "#/$defs/reviewDecision"
+        },
+        "assignedReviewerId": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "signedBy": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "verifiedBy": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "lastReviewedAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "notes": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "catalogExposure": {
+          "$ref": "#/$defs/catalogExposure"
+        },
+        "exposureFlag": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "moderationFlags": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/moderationFlag"
+          }
+        },
+        "policyFlags": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "submissionEnabled": {
+          "type": "boolean"
+        },
+        "reviewRequired": {
+          "type": "boolean"
+        },
+        "publishApprovalRequired": {
+          "type": "boolean"
+        },
+        "promotionSources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/trustLane"
+          },
+          "uniqueItems": true
+        }
+      }
+    }
+  }
+}

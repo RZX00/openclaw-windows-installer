@@ -24,6 +24,27 @@
     "managedRouteProfile": "none",
     "remotePrerequisites": []
   },
+  "community": {
+    "requestedTrustLane": "official",
+    "currentTrustLane": "official",
+    "submissionState": "published",
+    "review": {
+      "state": "publish-ready",
+      "decision": "publish",
+      "signedBy": "openclaw-release-pipeline",
+      "verifiedBy": "openclaw-release-pipeline",
+      "notes": "Official OpenClaw release lane item."
+    },
+    "visibility": {
+      "catalogExposure": "public",
+      "exposureFlag": null
+    },
+    "moderationFlags": [],
+    "policyFlags": [
+      "official-release",
+      "verified-publisher"
+    ]
+  },
   "verification": {
     "checks": [
       {

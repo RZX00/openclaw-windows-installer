@@ -242,6 +242,9 @@ $marketCatalogFilePath = Join-Path $OutputDir 'openclaw-market-catalog.json'
 $marketItemsDir = Join-Path $OutputDir 'store-items-vnext'
 $artifactIndexFilePath = Join-Path $OutputDir 'openclaw-market-artifact-index.json'
 $trustSnapshotFilePath = Join-Path $OutputDir 'openclaw-market-trust-snapshot.json'
+$trustDir = Join-Path $OutputDir 'trust'
+$trustLanePolicyFilePath = Join-Path $trustDir 'openclaw-trust-lane-policy.json'
+$reviewSnapshotFilePath = Join-Path $trustDir 'openclaw-market-review-snapshot.json'
 
 Get-ChildItem -LiteralPath $OutputDir -File -ErrorAction SilentlyContinue |
     Where-Object {
@@ -268,6 +271,9 @@ if (Test-Path -LiteralPath $storeItemsDir) {
 }
 if (Test-Path -LiteralPath $marketItemsDir) {
     Remove-Item -LiteralPath $marketItemsDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+if (Test-Path -LiteralPath $trustDir) {
+    Remove-Item -LiteralPath $trustDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 & $buildScript `
@@ -336,6 +342,8 @@ if (-not (Test-Path -LiteralPath $storeItemsDir -PathType Container)) {
     -OutputItemsDir $marketItemsDir `
     -OutputArtifactIndexPath $artifactIndexFilePath `
     -OutputTrustSnapshotPath $trustSnapshotFilePath `
+    -OutputTrustLanePolicyPath $trustLanePolicyFilePath `
+    -OutputReviewSnapshotPath $reviewSnapshotFilePath `
     -PackIds $selectedPackIds `
     -CatalogVersion $resolvedCatalogVersion `
     -Channel $storeChannel `
@@ -352,6 +360,12 @@ if (-not (Test-Path -LiteralPath $artifactIndexFilePath)) {
 }
 if (-not (Test-Path -LiteralPath $trustSnapshotFilePath)) {
     throw "Market trust snapshot asset was not produced: $trustSnapshotFilePath"
+}
+if (-not (Test-Path -LiteralPath $trustLanePolicyFilePath)) {
+    throw "Trust lane policy asset was not produced: $trustLanePolicyFilePath"
+}
+if (-not (Test-Path -LiteralPath $reviewSnapshotFilePath)) {
+    throw "Market review snapshot asset was not produced: $reviewSnapshotFilePath"
 }
 
 Write-Host ("[OK] Release asset: {0}" -f $baseFilePath)
@@ -371,3 +385,5 @@ Write-Host ("[OK] Market catalog: {0}" -f $marketCatalogFilePath)
 Write-Host ("[OK] Market item metadata directory: {0}" -f $marketItemsDir)
 Write-Host ("[OK] Market artifact index: {0}" -f $artifactIndexFilePath)
 Write-Host ("[OK] Market trust snapshot: {0}" -f $trustSnapshotFilePath)
+Write-Host ("[OK] Trust lane policy: {0}" -f $trustLanePolicyFilePath)
+Write-Host ("[OK] Market review snapshot: {0}" -f $reviewSnapshotFilePath)

@@ -10,6 +10,8 @@ client/catalog/
 +-- market-catalog.schema.json
 +-- artifact-index.schema.json
 +-- trust-snapshot.schema.json
++-- review-snapshot.schema.json
++-- trust-lane-policy.json
 +-- items/
 |   +-- <item-id>.json
 +-- collections/
@@ -26,6 +28,10 @@ client/catalog/
   - freezes the vNext artifact addressing payload keyed by artifact id + sha256
 - `trust-snapshot.schema.json`
   - freezes the vNext publish-time trust summary for each item
+- `review-snapshot.schema.json`
+  - freezes the vNext publish-time review and exposure projection for each item
+- `trust-lane-policy.json`
+  - declares the release-side trust lane policy that drives exposure and review defaults
 - `items/*.json`
   - per-item override metadata layered on top of workflow-pack manifests
 - `collections/*.json`
@@ -39,16 +45,19 @@ flowchart LR
     A --> C["build-openclaw-market-catalog.ps1"]
     D["client/catalog/items/*.json"] --> B
     D --> C
-    E["client/catalog/collections/*.json"] --> B
-    E --> C
-    F["release installers + archives + metadata"] --> B
+    E["client/catalog/trust-lane-policy.json"] --> C
+    F["client/catalog/collections/*.json"] --> B
     F --> C
-    B --> G["release/openclaw-store-catalog.json"]
-    B --> H["release/store-items/*.json"]
-    C --> I["release/openclaw-market-catalog.json"]
-    C --> J["release/store-items-vnext/*.json"]
-    C --> K["release/openclaw-market-artifact-index.json"]
-    C --> L["release/openclaw-market-trust-snapshot.json"]
+    G["release installers + archives + metadata"] --> B
+    G --> C
+    B --> H["release/openclaw-store-catalog.json"]
+    B --> I["release/store-items/*.json"]
+    C --> J["release/openclaw-market-catalog.json"]
+    C --> K["release/store-items-vnext/*.json"]
+    C --> L["release/openclaw-market-artifact-index.json"]
+    C --> M["release/openclaw-market-trust-snapshot.json"]
+    C --> N["release/trust/openclaw-trust-lane-policy.json"]
+    C --> O["release/trust/openclaw-market-review-snapshot.json"]
 ```
 
 ## Collection Behavior
@@ -74,6 +83,8 @@ vNext market item metadata
 vNext market catalog metadata
 market artifact index
 market trust snapshot
+market review snapshot
+trust lane policy snapshot
 ```
 
 ## Local Install Registry
@@ -110,5 +121,7 @@ Contract files:
   - vNext artifact addressing contract
 - `client/catalog/trust-snapshot.schema.json`
   - vNext trust publish contract
+- `client/catalog/review-snapshot.schema.json`
+  - vNext review and exposure publish contract
 - `client/catalog/install-registry.schema.json`
   - local install-registry contract

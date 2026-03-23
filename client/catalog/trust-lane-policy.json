@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "lanes": [
+    {
+      "id": "official",
+      "displayName": "Official",
+      "publisherProofRequired": true,
+      "auditRequired": true,
+      "remoteSecretsAllowed": true,
+      "defaultInstallPermission": "allow",
+      "uiBadge": "Official",
+      "submissionEnabled": false,
+      "reviewRequired": true,
+      "publishApprovalRequired": true,
+      "catalogExposure": "public",
+      "exposureFlag": null,
+      "promotionSources": []
+    },
+    {
+      "id": "verified-community",
+      "displayName": "Verified Community",
+      "publisherProofRequired": true,
+      "auditRequired": true,
+      "remoteSecretsAllowed": true,
+      "defaultInstallPermission": "allow",
+      "uiBadge": "Verified",
+      "submissionEnabled": false,
+      "reviewRequired": true,
+      "publishApprovalRequired": true,
+      "catalogExposure": "feature-flagged",
+      "exposureFlag": "openclaw.community.verified",
+      "promotionSources": [
+        "community"
+      ]
+    },
+    {
+      "id": "community",
+      "displayName": "Community",
+      "publisherProofRequired": false,
+      "auditRequired": true,
+      "remoteSecretsAllowed": false,
+      "defaultInstallPermission": "confirm",
+      "uiBadge": "Community",
+      "submissionEnabled": true,
+      "reviewRequired": true,
+      "publishApprovalRequired": true,
+      "catalogExposure": "feature-flagged",
+      "exposureFlag": "openclaw.community.catalog",
+      "promotionSources": []
+    },
+    {
+      "id": "local-import",
+      "displayName": "Local Import",
+      "publisherProofRequired": false,
+      "auditRequired": false,
+      "remoteSecretsAllowed": false,
+      "defaultInstallPermission": "confirm",
+      "uiBadge": "Local",
+      "submissionEnabled": false,
+      "reviewRequired": false,
+      "publishApprovalRequired": false,
+      "catalogExposure": "hidden",
+      "exposureFlag": null,
+      "promotionSources": []
+    }
+  ]
+}
