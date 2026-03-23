@@ -62,6 +62,21 @@ git push origin v0.1.3
 
 ## 本地预构建
 
+如果当前是在共享工作区中联动 `aip` + `openclaw-setup-cn` 做发布前检查，先执行跨仓库合同预检：
+
+```powershell
+node ..\aip\scripts\platform-contracts.mjs sync
+```
+
+这一步会：
+
+- 生成本地 `aip/platform-versions.lock.json`
+- 校验 `aip` 和 `openclaw-setup-cn` 的当前版本面
+- 校验本地 release manifest 合同
+- 校验站点下载别名是否仍与当前品牌面一致
+
+`platform-versions.lock.json` 是本地生成型合同文件，默认不提交到 git。
+
 正式发布构建：
 
 ```powershell
