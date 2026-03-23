@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openclaw.local/schemas/entitlement.schema.json",
+  "title": "OpenClaw Market Entitlement",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "entitlementId",
+    "userId",
+    "itemId",
+    "entitlementKind",
+    "ownershipScope",
+    "sourceLedgerId",
+    "status",
+    "grantedAt",
+    "expiresAt",
+    "revokeReason"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "entitlementId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "userId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "itemId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "entitlementKind": {
+      "type": "string",
+      "enum": [
+        "none",
+        "perpetual",
+        "subscription",
+        "seat-bound",
+        "device-bound"
+      ]
+    },
+    "ownershipScope": {
+      "type": "string",
+      "enum": [
+        "account",
+        "device",
+        "workspace"
+      ]
+    },
+    "sourceLedgerId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "granted",
+        "pending",
+        "expired",
+        "revoked"
+      ]
+    },
+    "grantedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expiresAt": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "revokeReason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

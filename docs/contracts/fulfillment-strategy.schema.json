@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openclaw.local/schemas/fulfillment-strategy.schema.json",
+  "title": "OpenClaw Fulfillment Strategy Catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "strategies"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "strategies": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/strategy"
+      }
+    }
+  },
+  "$defs": {
+    "strategy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "requiresArtifacts",
+        "producesLocalPayload",
+        "producesRemoteBinding",
+        "supportsOfflineInstall",
+        "defaultInstallPhases",
+        "registryMode"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "enum": [
+            "local-install-pack",
+            "connector-config-bundle",
+            "hybrid-provisioning",
+            "local-import"
+          ]
+        },
+        "requiresArtifacts": {
+          "type": "boolean"
+        },
+        "producesLocalPayload": {
+          "type": "boolean"
+        },
+        "producesRemoteBinding": {
+          "type": "boolean"
+        },
+        "supportsOfflineInstall": {
+          "type": "boolean"
+        },
+        "defaultInstallPhases": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "resolve",
+              "download",
+              "verify-artifacts",
+              "install-local",
+              "configure-remote",
+              "provision",
+              "verify",
+              "sync-registry"
+            ]
+          }
+        },
+        "registryMode": {
+          "type": "string",
+          "enum": [
+            "local-only",
+            "remote-only",
+            "hybrid"
+          ]
+        }
+      }
+    }
+  }
+}

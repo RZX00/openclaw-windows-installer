@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openclaw.local/schemas/wallet-ledger.schema.json",
+  "title": "OpenClaw Wallet Ledger Entry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "ledgerId",
+    "walletId",
+    "userId",
+    "direction",
+    "amountCredits",
+    "reasonType",
+    "reasonRefId",
+    "balanceAfter",
+    "status",
+    "createdAt"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "ledgerId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "walletId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "userId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "direction": {
+      "type": "string",
+      "enum": [
+        "debit",
+        "credit"
+      ]
+    },
+    "amountCredits": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "reasonType": {
+      "type": "string",
+      "enum": [
+        "top-up",
+        "runtime-usage",
+        "item-purchase",
+        "refund",
+        "grant",
+        "reversal"
+      ]
+    },
+    "reasonRefId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "balanceAfter": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "committed",
+        "reversed",
+        "failed"
+      ]
+    },
+    "metadata": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

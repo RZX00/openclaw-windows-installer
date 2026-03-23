@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openclaw.local/schemas/fulfillment-job.schema.json",
+  "title": "OpenClaw Fulfillment Job",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "jobId",
+    "itemId",
+    "itemKind",
+    "fulfillmentStrategy",
+    "action",
+    "trustLane",
+    "state",
+    "progressPercent",
+    "startedAt",
+    "updatedAt",
+    "finishedAt"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "jobId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "itemId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "itemKind": {
+      "type": "string",
+      "enum": [
+        "capability-pack",
+        "connector-item",
+        "hybrid-item",
+        "local-import-shadow"
+      ]
+    },
+    "fulfillmentStrategy": {
+      "type": "string",
+      "enum": [
+        "local-install-pack",
+        "connector-config-bundle",
+        "hybrid-provisioning",
+        "local-import"
+      ]
+    },
+    "action": {
+      "type": "string",
+      "enum": [
+        "install",
+        "verify",
+        "repair",
+        "update",
+        "uninstall",
+        "configure"
+      ]
+    },
+    "trustLane": {
+      "type": "string",
+      "enum": [
+        "official",
+        "verified-community",
+        "community",
+        "local-import"
+      ]
+    },
+    "state": {
+      "type": "string",
+      "enum": [
+        "queued",
+        "resolving",
+        "acquiring",
+        "installing",
+        "configuring",
+        "provisioning",
+        "verifying",
+        "completed",
+        "ready",
+        "needs-setup",
+        "needs-repair",
+        "blocked",
+        "failed",
+        "cancelled"
+      ]
+    },
+    "progressPercent": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 100
+    },
+    "error": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "startedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "finishedAt": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    }
+  }
+}

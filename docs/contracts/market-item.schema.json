@@ -1,0 +1,497 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openclaw.local/schemas/market-item.schema.json",
+  "title": "OpenClaw Market Item",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "id",
+    "slug",
+    "version",
+    "publisher",
+    "presentation",
+    "classification",
+    "commercial",
+    "distribution",
+    "localContract",
+    "remoteContract",
+    "trust",
+    "compatibility"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "slug": {
+      "type": "string",
+      "minLength": 1
+    },
+    "version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "publisher": {
+      "$ref": "#/$defs/publisher"
+    },
+    "presentation": {
+      "$ref": "#/$defs/presentation"
+    },
+    "classification": {
+      "$ref": "#/$defs/classification"
+    },
+    "commercial": {
+      "$ref": "#/$defs/commercial"
+    },
+    "distribution": {
+      "$ref": "#/$defs/distribution"
+    },
+    "localContract": {
+      "$ref": "#/$defs/localContract"
+    },
+    "remoteContract": {
+      "$ref": "#/$defs/remoteContract"
+    },
+    "trust": {
+      "$ref": "#/$defs/trust"
+    },
+    "compatibility": {
+      "$ref": "#/$defs/compatibility"
+    }
+  },
+  "$defs": {
+    "nullableString": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "stringArray": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "publisher": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "publisherId",
+        "displayName",
+        "verified"
+      ],
+      "properties": {
+        "publisherId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "verified": {
+          "type": "boolean"
+        }
+      }
+    },
+    "presentation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "title",
+        "summary",
+        "description",
+        "artwork",
+        "screenshots",
+        "tags",
+        "categories"
+      ],
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "artwork": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "screenshots": {
+          "$ref": "#/$defs/stringArray"
+        },
+        "tags": {
+          "$ref": "#/$defs/stringArray"
+        },
+        "categories": {
+          "$ref": "#/$defs/stringArray"
+        }
+      }
+    },
+    "classification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "itemKind",
+        "fulfillmentStrategy",
+        "trustLane",
+        "compatibilityClass"
+      ],
+      "properties": {
+        "itemKind": {
+          "type": "string",
+          "enum": [
+            "capability-pack",
+            "connector-item",
+            "hybrid-item",
+            "local-import-shadow"
+          ]
+        },
+        "fulfillmentStrategy": {
+          "type": "string",
+          "enum": [
+            "local-install-pack",
+            "connector-config-bundle",
+            "hybrid-provisioning",
+            "local-import"
+          ]
+        },
+        "trustLane": {
+          "type": "string",
+          "enum": [
+            "official",
+            "verified-community",
+            "community",
+            "local-import"
+          ]
+        },
+        "compatibilityClass": {
+          "type": "string",
+          "enum": [
+            "openclaw-local",
+            "openclaw-remote",
+            "hybrid",
+            "universal-metadata"
+          ]
+        }
+      }
+    },
+    "commercial": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pricingModel",
+        "priceCredits",
+        "billingBehavior",
+        "entitlementKind",
+        "ownershipScope"
+      ],
+      "properties": {
+        "pricingModel": {
+          "type": "string",
+          "enum": [
+            "free",
+            "one-time",
+            "metered",
+            "subscription",
+            "bundled"
+          ]
+        },
+        "priceCredits": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "billingBehavior": {
+          "type": "string",
+          "enum": [
+            "none",
+            "one-time-purchase",
+            "recurring",
+            "usage-linked",
+            "bundled-with-plan"
+          ]
+        },
+        "entitlementKind": {
+          "type": "string",
+          "enum": [
+            "none",
+            "perpetual",
+            "subscription",
+            "seat-bound",
+            "device-bound"
+          ]
+        },
+        "ownershipScope": {
+          "type": "string",
+          "enum": [
+            "account",
+            "device",
+            "workspace"
+          ]
+        }
+      }
+    },
+    "artifactDescriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifactId",
+        "kind",
+        "fileName",
+        "relativePath",
+        "sha256",
+        "sizeBytes",
+        "required"
+      ],
+      "properties": {
+        "artifactId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "installer",
+            "archive",
+            "support-archive",
+            "build-metadata",
+            "source-lock",
+            "catalog-item",
+            "connector-bundle"
+          ]
+        },
+        "fileName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "relativePath": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "required": {
+          "type": "boolean"
+        }
+      }
+    },
+    "distribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifactId",
+        "deliveryMode",
+        "cachePolicy",
+        "artifacts"
+      ],
+      "properties": {
+        "artifactId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "deliveryMode": {
+          "type": "string",
+          "enum": [
+            "bundled",
+            "downloadable",
+            "remote-managed",
+            "hybrid"
+          ]
+        },
+        "cachePolicy": {
+          "type": "string",
+          "enum": [
+            "immutable",
+            "versioned",
+            "refreshable"
+          ]
+        },
+        "primaryArtifactId": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/artifactDescriptor"
+          }
+        }
+      }
+    },
+    "localContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pluginIds",
+        "skillIds",
+        "runtimeProfiles",
+        "includedItemIds",
+        "provisioningProfile",
+        "verificationProfile",
+        "repairProfile"
+      ],
+      "properties": {
+        "pluginIds": {
+          "$ref": "#/$defs/stringArray"
+        },
+        "skillIds": {
+          "$ref": "#/$defs/stringArray"
+        },
+        "runtimeProfiles": {
+          "$ref": "#/$defs/stringArray"
+        },
+        "includedItemIds": {
+          "$ref": "#/$defs/stringArray"
+        },
+        "provisioningProfile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "verificationProfile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "repairProfile": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "remoteContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "secretScope",
+        "connectorScope",
+        "managedRouteProfile",
+        "remotePrerequisites"
+      ],
+      "properties": {
+        "secretScope": {
+          "type": "string",
+          "enum": [
+            "none",
+            "platform-managed-shared",
+            "publisher-managed-scoped",
+            "user-supplied-local",
+            "user-supplied-synced"
+          ]
+        },
+        "connectorScope": {
+          "type": "string",
+          "enum": [
+            "none",
+            "model-provider",
+            "document-tool",
+            "browser-tool",
+            "notification",
+            "custom"
+          ]
+        },
+        "managedRouteProfile": {
+          "type": "string",
+          "enum": [
+            "none",
+            "openclaw-config",
+            "gateway-token",
+            "hybrid-route"
+          ]
+        },
+        "remotePrerequisites": {
+          "$ref": "#/$defs/stringArray"
+        }
+      }
+    },
+    "trust": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "releaseChannel",
+        "auditStatus",
+        "auditSummary",
+        "sourcePinned",
+        "releaseBlocked"
+      ],
+      "properties": {
+        "releaseChannel": {
+          "type": "string",
+          "enum": [
+            "official",
+            "beta",
+            "local"
+          ]
+        },
+        "auditStatus": {
+          "type": "string",
+          "enum": [
+            "passed",
+            "warning",
+            "blocked"
+          ]
+        },
+        "auditSummary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourcePinned": {
+          "type": "boolean"
+        },
+        "releaseBlocked": {
+          "type": "boolean"
+        }
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "platforms",
+        "architectures",
+        "openClawVersionRange",
+        "requiresAdmin",
+        "supportsOfflineInstall"
+      ],
+      "properties": {
+        "platforms": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "windows",
+              "macos",
+              "linux"
+            ]
+          }
+        },
+        "architectures": {
+          "$ref": "#/$defs/stringArray"
+        },
+        "openClawVersionRange": {
+          "type": "string",
+          "minLength": 1
+        },
+        "requiresAdmin": {
+          "type": "boolean"
+        },
+        "supportsOfflineInstall": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

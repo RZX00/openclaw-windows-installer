@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openclaw.local/schemas/trust-lane-policy.schema.json",
+  "title": "OpenClaw Trust Lane Policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "lanes"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "lanes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/lane"
+      }
+    }
+  },
+  "$defs": {
+    "lane": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "displayName",
+        "publisherProofRequired",
+        "auditRequired",
+        "remoteSecretsAllowed",
+        "defaultInstallPermission",
+        "uiBadge"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "enum": [
+            "official",
+            "verified-community",
+            "community",
+            "local-import"
+          ]
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "publisherProofRequired": {
+          "type": "boolean"
+        },
+        "auditRequired": {
+          "type": "boolean"
+        },
+        "remoteSecretsAllowed": {
+          "type": "boolean"
+        },
+        "defaultInstallPermission": {
+          "type": "string",
+          "enum": [
+            "allow",
+            "confirm",
+            "block"
+          ]
+        },
+        "uiBadge": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}
