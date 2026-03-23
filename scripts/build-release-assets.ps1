@@ -42,6 +42,115 @@ function Read-JsonFile {
     return (Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json)
 }
 
+function Get-UtcTimestamp {
+    return [DateTime]::UtcNow.ToString("o")
+}
+
+function Get-FileSha256 {
+    param([string]$Path)
+
+    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Get-NormalizedRelativePath {
+    param(
+        [string]$Root,
+        [string]$Path
+    )
+
+    return [System.IO.Path]::GetRelativePath($Root, $Path).Replace('\', '/')
+}
+
+function ConvertTo-ArtifactToken {
+    param([string]$Value)
+
+    $normalized = [regex]::Replace($Value.ToLowerInvariant(), '[^a-z0-9]+', '-')
+    return $normalized.Trim('-')
+}
+
+function Get-GitText {
+    param([string[]]$Arguments)
+
+    try {
+        $result = & git -C $repoRoot @Arguments 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            return (($result | Out-String).Trim())
+        }
+    } catch {}
+
+    return $null
+}
+
+function Get-GitHubRepositorySlug {
+    $remoteUrl = Get-GitText -Arguments @('remote', 'get-url', 'origin')
+    if (-not [string]::IsNullOrWhiteSpace($remoteUrl)) {
+        if ($remoteUrl -match 'github\.com[:/](?<slug>[^/]+/[^/]+?)(?:\.git)?$') {
+            return $Matches.slug
+        }
+    }
+
+    return 'RZX00/openclaw-windows-installer'
+}
+
+function New-ReleaseDownloadMetadata {
+    param(
+        [string]$RepositorySlug,
+        [string]$FileName,
+        [string]$ReleaseTag
+    )
+
+    $latestDownloadUrl = "https://github.com/$RepositorySlug/releases/latest/download/$FileName"
+    $downloadUrl = if ([string]::IsNullOrWhiteSpace($ReleaseTag)) {
+        $null
+    } else {
+        "https://github.com/$RepositorySlug/releases/download/$ReleaseTag/$FileName"
+    }
+
+    return [pscustomobject]@{
+        DownloadUrl       = $downloadUrl
+        LatestDownloadUrl = $latestDownloadUrl
+    }
+}
+
+function New-ReleaseArtifactRecord {
+    param(
+        [string]$OutputDir,
+        [string]$Path,
+        [string]$ArtifactId,
+        [string]$Kind,
+        [string]$RepositorySlug,
+        [string]$ReleaseTag,
+        [string]$Platform,
+        [string]$Architecture
+    )
+
+    $item = Get-Item -LiteralPath $Path
+    $downloadMetadata = New-ReleaseDownloadMetadata `
+        -RepositorySlug $RepositorySlug `
+        -FileName $item.Name `
+        -ReleaseTag $ReleaseTag
+
+    $artifact = [ordered]@{
+        artifactId        = $ArtifactId
+        kind              = $Kind
+        fileName          = $item.Name
+        relativePath      = Get-NormalizedRelativePath -Root $OutputDir -Path $item.FullName
+        sizeBytes         = [int64]$item.Length
+        sha256            = Get-FileSha256 -Path $item.FullName
+        downloadUrl       = $downloadMetadata.DownloadUrl
+        latestDownloadUrl = $downloadMetadata.LatestDownloadUrl
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($Platform)) {
+        $artifact.platform = $Platform
+    }
+    if (-not [string]::IsNullOrWhiteSpace($Architecture)) {
+        $artifact.architecture = $Architecture
+    }
+
+    return [pscustomobject]$artifact
+}
+
 function Get-ReleaseLauncherDefinitions {
     param([string]$Locale)
 
@@ -201,6 +310,167 @@ function Get-WorkflowPackDefinitions {
     }
 
     return @($definitions.ToArray())
+}
+
+function Export-ReleaseManifest {
+    param(
+        [string]$OutputDir,
+        [string]$Architecture,
+        [string]$Channel,
+        [string]$Locale,
+        [string]$ReleaseVersion,
+        [string]$ReleaseTag,
+        [string]$BaseFilePath,
+        [object[]]$WorkflowPackOutputs,
+        [string[]]$LauncherPaths,
+        [string[]]$LauncherSupportPaths,
+        [string]$CatalogFilePath,
+        [string]$MarketCatalogFilePath,
+        [string]$ArtifactIndexFilePath,
+        [string]$TrustSnapshotFilePath,
+        [string]$TrustLanePolicyFilePath,
+        [string]$ReviewSnapshotFilePath
+    )
+
+    $repositorySlug = Get-GitHubRepositorySlug
+    $commitSha = Get-GitText -Arguments @('rev-parse', 'HEAD')
+    $sourceBranch = Get-GitText -Arguments @('rev-parse', '--abbrev-ref', 'HEAD')
+    $artifacts = New-Object System.Collections.Generic.List[object]
+
+    $installerArtifactId = "openclaw-installer-windows-$Architecture"
+    $artifacts.Add((New-ReleaseArtifactRecord `
+        -OutputDir $OutputDir `
+        -Path $BaseFilePath `
+        -ArtifactId $installerArtifactId `
+        -Kind 'installer' `
+        -RepositorySlug $repositorySlug `
+        -ReleaseTag $ReleaseTag `
+        -Platform 'windows' `
+        -Architecture $Architecture)) | Out-Null
+
+    $workflowPackPointers = [ordered]@{}
+    foreach ($output in @($WorkflowPackOutputs)) {
+        $installerArtifactId = "openclaw-workflow-pack-$($output.PackId)-installer-windows-$Architecture"
+        $archiveArtifactId = "openclaw-workflow-pack-$($output.PackId)-archive"
+        $workflowPackPointers[$output.PackId] = [ordered]@{
+            installerArtifactId = $installerArtifactId
+            archiveArtifactId   = $archiveArtifactId
+        }
+
+        $artifacts.Add((New-ReleaseArtifactRecord `
+            -OutputDir $OutputDir `
+            -Path $output.InstallerPath `
+            -ArtifactId $installerArtifactId `
+            -Kind 'workflow-pack-installer' `
+            -RepositorySlug $repositorySlug `
+            -ReleaseTag $ReleaseTag `
+            -Platform 'windows' `
+            -Architecture $Architecture)) | Out-Null
+        $artifacts.Add((New-ReleaseArtifactRecord `
+            -OutputDir $OutputDir `
+            -Path $output.ArchivePath `
+            -ArtifactId $archiveArtifactId `
+            -Kind 'workflow-pack-archive' `
+            -RepositorySlug $repositorySlug `
+            -ReleaseTag $ReleaseTag `
+            -Platform $null `
+            -Architecture $null)) | Out-Null
+    }
+
+    foreach ($launcherPath in @($LauncherPaths)) {
+        $launcherItem = Get-Item -LiteralPath $launcherPath
+        $launcherToken = ConvertTo-ArtifactToken -Value $launcherItem.BaseName.Replace('OpenClaw-', '')
+        $artifacts.Add((New-ReleaseArtifactRecord `
+            -OutputDir $OutputDir `
+            -Path $launcherPath `
+            -ArtifactId "openclaw-launcher-$launcherToken-windows-$Architecture" `
+            -Kind 'launcher' `
+            -RepositorySlug $repositorySlug `
+            -ReleaseTag $ReleaseTag `
+            -Platform 'windows' `
+            -Architecture $Architecture)) | Out-Null
+    }
+
+    foreach ($supportPath in @($LauncherSupportPaths)) {
+        $supportItem = Get-Item -LiteralPath $supportPath
+        $supportToken = ConvertTo-ArtifactToken -Value ([System.IO.Path]::ChangeExtension($supportItem.Name, $null))
+        $artifacts.Add((New-ReleaseArtifactRecord `
+            -OutputDir $OutputDir `
+            -Path $supportPath `
+            -ArtifactId "openclaw-support-$supportToken" `
+            -Kind 'launcher-support' `
+            -RepositorySlug $repositorySlug `
+            -ReleaseTag $ReleaseTag `
+            -Platform $null `
+            -Architecture $null)) | Out-Null
+    }
+
+    $topLevelArtifacts = @(
+        @{ Path = $CatalogFilePath; ArtifactId = 'openclaw-store-catalog'; Kind = 'store-catalog' },
+        @{ Path = $MarketCatalogFilePath; ArtifactId = 'openclaw-market-catalog'; Kind = 'market-catalog' },
+        @{ Path = $ArtifactIndexFilePath; ArtifactId = 'openclaw-market-artifact-index'; Kind = 'market-artifact-index' },
+        @{ Path = $TrustSnapshotFilePath; ArtifactId = 'openclaw-market-trust-snapshot'; Kind = 'market-trust-snapshot' },
+        @{ Path = $TrustLanePolicyFilePath; ArtifactId = 'openclaw-trust-lane-policy'; Kind = 'trust-lane-policy' },
+        @{ Path = $ReviewSnapshotFilePath; ArtifactId = 'openclaw-market-review-snapshot'; Kind = 'market-review-snapshot' }
+    )
+
+    foreach ($entry in $topLevelArtifacts) {
+        $artifacts.Add((New-ReleaseArtifactRecord `
+            -OutputDir $OutputDir `
+            -Path $entry.Path `
+            -ArtifactId $entry.ArtifactId `
+            -Kind $entry.Kind `
+            -RepositorySlug $repositorySlug `
+            -ReleaseTag $ReleaseTag `
+            -Platform $null `
+            -Architecture $null)) | Out-Null
+    }
+
+    $manifest = [ordered]@{
+        schemaVersion = 1
+        product = [ordered]@{
+            id            = 'openclaw'
+            name          = 'OpenClaw'
+            sourceRepo    = 'openclaw-setup-cn'
+            sourceRepoUrl = "https://github.com/$repositorySlug"
+        }
+        release = [ordered]@{
+            version     = $ReleaseVersion
+            tag         = if ([string]::IsNullOrWhiteSpace($ReleaseTag)) { $null } else { $ReleaseTag }
+            channel     = $Channel
+            locale      = $Locale
+            architecture = $Architecture
+            generatedAt = Get-UtcTimestamp
+            commitSha   = if ([string]::IsNullOrWhiteSpace($commitSha)) { $null } else { $commitSha }
+            sourceBranch = if ([string]::IsNullOrWhiteSpace($sourceBranch)) { $null } else { $sourceBranch }
+        }
+        artifacts = @($artifacts.ToArray())
+        pointers = [ordered]@{
+            installer = [ordered]@{
+                windows = [ordered]@{
+                    $Architecture = "openclaw-installer-windows-$Architecture"
+                }
+            }
+            store = [ordered]@{
+                catalogArtifactId           = 'openclaw-store-catalog'
+                marketCatalogArtifactId     = 'openclaw-market-catalog'
+                marketArtifactIndexArtifactId = 'openclaw-market-artifact-index'
+                trustSnapshotArtifactId     = 'openclaw-market-trust-snapshot'
+                trustLanePolicyArtifactId   = 'openclaw-trust-lane-policy'
+                reviewSnapshotArtifactId    = 'openclaw-market-review-snapshot'
+            }
+            launchers = [ordered]@{
+                startArtifactId  = "openclaw-launcher-start-windows-$Architecture"
+                updateArtifactId = "openclaw-launcher-update-windows-$Architecture"
+                repairArtifactId = "openclaw-launcher-repair-windows-$Architecture"
+            }
+            workflowPacks = $workflowPackPointers
+        }
+    }
+
+    $manifestPath = Join-Path $OutputDir 'release-manifest.json'
+    ($manifest | ConvertTo-Json -Depth 16) | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+    return $manifestPath
 }
 
 $repoRoot = Split-Path -Path $PSScriptRoot -Parent
@@ -368,6 +638,24 @@ if (-not (Test-Path -LiteralPath $reviewSnapshotFilePath)) {
     throw "Market review snapshot asset was not produced: $reviewSnapshotFilePath"
 }
 
+$releaseManifestFilePath = Export-ReleaseManifest `
+    -OutputDir $OutputDir `
+    -Architecture $Architecture `
+    -Channel $Channel `
+    -Locale $Locale `
+    -ReleaseVersion $resolvedCatalogVersion `
+    -ReleaseTag $ReleaseTag `
+    -BaseFilePath $baseFilePath `
+    -WorkflowPackOutputs @($workflowPackOutputs.ToArray()) `
+    -LauncherPaths $launcherPaths `
+    -LauncherSupportPaths $launcherSupportPaths `
+    -CatalogFilePath $catalogFilePath `
+    -MarketCatalogFilePath $marketCatalogFilePath `
+    -ArtifactIndexFilePath $artifactIndexFilePath `
+    -TrustSnapshotFilePath $trustSnapshotFilePath `
+    -TrustLanePolicyFilePath $trustLanePolicyFilePath `
+    -ReviewSnapshotFilePath $reviewSnapshotFilePath
+
 Write-Host ("[OK] Release asset: {0}" -f $baseFilePath)
 foreach ($output in @($workflowPackOutputs.ToArray())) {
     Write-Host ("[OK] Workflow pack installer: {0}" -f $output.InstallerPath)
@@ -387,3 +675,4 @@ Write-Host ("[OK] Market artifact index: {0}" -f $artifactIndexFilePath)
 Write-Host ("[OK] Market trust snapshot: {0}" -f $trustSnapshotFilePath)
 Write-Host ("[OK] Trust lane policy: {0}" -f $trustLanePolicyFilePath)
 Write-Host ("[OK] Market review snapshot: {0}" -f $reviewSnapshotFilePath)
+Write-Host ("[OK] Release manifest: {0}" -f $releaseManifestFilePath)

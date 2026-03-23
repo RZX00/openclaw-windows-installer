@@ -38,11 +38,18 @@ jobs:
           name: windows-release-assets
           path: |
             ${{ steps.build.outputs.release_dir }}/OpenClaw-Setup-Windows-x64.exe
-            ${{ steps.build.outputs.release_dir }}/OpenClaw-Workflow-Pack-Workflow-Zone.exe
-            ${{ steps.build.outputs.release_dir }}/OpenClaw-Workflow-Pack-Workflow-Zone.zip
+            ${{ steps.build.outputs.release_dir }}/OpenClaw-Workflow-Pack-*.exe
+            ${{ steps.build.outputs.release_dir }}/OpenClaw-Workflow-Pack-*.zip
             ${{ steps.build.outputs.release_dir }}/OpenClaw-Start.exe
             ${{ steps.build.outputs.release_dir }}/OpenClaw-Update.exe
             ${{ steps.build.outputs.release_dir }}/OpenClaw-Repair.exe
+            ${{ steps.build.outputs.release_dir }}/openclaw-store-catalog.json
+            ${{ steps.build.outputs.release_dir }}/openclaw-market-catalog.json
+            ${{ steps.build.outputs.release_dir }}/openclaw-market-artifact-index.json
+            ${{ steps.build.outputs.release_dir }}/openclaw-market-trust-snapshot.json
+            ${{ steps.build.outputs.release_dir }}/release-manifest.json
+            ${{ steps.build.outputs.release_dir }}/trust/*.json
+            ${{ steps.build.outputs.release_dir }}/support/*
           if-no-files-found: error
 
       - name: Publish GitHub Release
@@ -52,7 +59,15 @@ jobs:
           generate_release_notes: true
           files: |
             ${{ steps.build.outputs.release_dir }}/OpenClaw-Setup-Windows-x64.exe
-            ${{ steps.build.outputs.release_dir }}/OpenClaw-Workflow-Pack-Workflow-Zone.exe
+            ${{ steps.build.outputs.release_dir }}/OpenClaw-Workflow-Pack-*.exe
+            ${{ steps.build.outputs.release_dir }}/OpenClaw-Workflow-Pack-*.zip
             ${{ steps.build.outputs.release_dir }}/OpenClaw-Start.exe
             ${{ steps.build.outputs.release_dir }}/OpenClaw-Update.exe
             ${{ steps.build.outputs.release_dir }}/OpenClaw-Repair.exe
+            ${{ steps.build.outputs.release_dir }}/openclaw-store-catalog.json
+            ${{ steps.build.outputs.release_dir }}/openclaw-market-catalog.json
+            ${{ steps.build.outputs.release_dir }}/openclaw-market-artifact-index.json
+            ${{ steps.build.outputs.release_dir }}/openclaw-market-trust-snapshot.json
+            ${{ steps.build.outputs.release_dir }}/release-manifest.json
+            ${{ steps.build.outputs.release_dir }}/trust/*.json
+            ${{ steps.build.outputs.release_dir }}/support/*
