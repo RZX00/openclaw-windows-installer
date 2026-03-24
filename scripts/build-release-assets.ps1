@@ -241,14 +241,29 @@ function Compile-CSharpExecutable {
 function Get-ReleaseLauncherSupportDefinitions {
     return @(
         [pscustomobject]@{
-            FileName    = "OpenClaw-Maintenance.ps1"
-            SourcePath  = (Join-Path $repoRoot "client\windows-openclaw-maintenance.ps1")
-            Placeholder = "__OPENCLAW_EMBEDDED_SUPPORT_OPENCLAW_MAINTENANCE_GZIP_BASE64__"
+            RelativePath = "OpenClaw-Maintenance.ps1"
+            SourcePath   = (Join-Path $repoRoot "client\windows-openclaw-maintenance.ps1")
+            Placeholder  = "__OPENCLAW_EMBEDDED_SUPPORT_OPENCLAW_MAINTENANCE_GZIP_BASE64__"
         },
         [pscustomobject]@{
-            FileName    = "install-windows-core.ps1"
-            SourcePath  = (Join-Path $repoRoot "client\install-windows-core.ps1")
-            Placeholder = "__OPENCLAW_EMBEDDED_SUPPORT_INSTALL_WINDOWS_CORE_GZIP_BASE64__"
+            RelativePath = "install-windows-core.ps1"
+            SourcePath   = (Join-Path $repoRoot "client\install-windows-core.ps1")
+            Placeholder  = "__OPENCLAW_EMBEDDED_SUPPORT_INSTALL_WINDOWS_CORE_GZIP_BASE64__"
+        },
+        [pscustomobject]@{
+            RelativePath = "modules\OpenClaw.WorkflowPack.Common.psm1"
+            SourcePath   = (Join-Path $repoRoot "client\modules\OpenClaw.WorkflowPack.Common.psm1")
+            Placeholder  = "__OPENCLAW_EMBEDDED_SUPPORT_OPENCLAW_WORKFLOWPACK_COMMON_MODULE_GZIP_BASE64__"
+        },
+        [pscustomobject]@{
+            RelativePath = "modules\OpenClaw.WorkflowPack.Installer.psm1"
+            SourcePath   = (Join-Path $repoRoot "client\modules\OpenClaw.WorkflowPack.Installer.psm1")
+            Placeholder  = "__OPENCLAW_EMBEDDED_SUPPORT_OPENCLAW_WORKFLOWPACK_INSTALLER_MODULE_GZIP_BASE64__"
+        },
+        [pscustomobject]@{
+            RelativePath = "modules\OpenClaw.WorkflowPack.Store.psm1"
+            SourcePath   = (Join-Path $repoRoot "client\modules\OpenClaw.WorkflowPack.Store.psm1")
+            Placeholder  = "__OPENCLAW_EMBEDDED_SUPPORT_OPENCLAW_WORKFLOWPACK_STORE_MODULE_GZIP_BASE64__"
         }
     )
 }
@@ -268,7 +283,10 @@ function Publish-ReleaseLauncherSupportAssets {
             throw "Launcher support asset was not found: $($definition.SourcePath)"
         }
 
-        $outputPath = Join-Path $supportDir $definition.FileName
+        $outputPath = Join-Path $supportDir $definition.RelativePath
+        $outputParent = Split-Path -Path $outputPath -Parent
+        Ensure-Directory -Path $outputParent
+
         Copy-Item -LiteralPath $definition.SourcePath -Destination $outputPath -Force
         if (-not (Test-Path -LiteralPath $outputPath)) {
             throw "Launcher support asset was not produced: $outputPath"

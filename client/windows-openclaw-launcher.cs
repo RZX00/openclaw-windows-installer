@@ -22,6 +22,9 @@ internal static class Program
     private const string RepositoryUrl = "https://github.com/RZX00/openclaw-windows-installer";
     private const string EmbeddedMaintenanceScriptPayload = "__OPENCLAW_EMBEDDED_SUPPORT_OPENCLAW_MAINTENANCE_GZIP_BASE64__";
     private const string EmbeddedCoreInstallerPayload = "__OPENCLAW_EMBEDDED_SUPPORT_INSTALL_WINDOWS_CORE_GZIP_BASE64__";
+    private const string EmbeddedWorkflowPackCommonModulePayload = "__OPENCLAW_EMBEDDED_SUPPORT_OPENCLAW_WORKFLOWPACK_COMMON_MODULE_GZIP_BASE64__";
+    private const string EmbeddedWorkflowPackInstallerModulePayload = "__OPENCLAW_EMBEDDED_SUPPORT_OPENCLAW_WORKFLOWPACK_INSTALLER_MODULE_GZIP_BASE64__";
+    private const string EmbeddedWorkflowPackStoreModulePayload = "__OPENCLAW_EMBEDDED_SUPPORT_OPENCLAW_WORKFLOWPACK_STORE_MODULE_GZIP_BASE64__";
 
     private sealed class LicenseGateResult
     {
@@ -394,38 +397,45 @@ internal static class Program
         }
     }
 
+    private static IEnumerable<KeyValuePair<string, string>> GetSupportPayloadDefinitions()
+    {
+        yield return new KeyValuePair<string, string>("OpenClaw-Maintenance.ps1", EmbeddedMaintenanceScriptPayload);
+        yield return new KeyValuePair<string, string>("install-windows-core.ps1", EmbeddedCoreInstallerPayload);
+        yield return new KeyValuePair<string, string>(Path.Combine("modules", "OpenClaw.WorkflowPack.Common.psm1"), EmbeddedWorkflowPackCommonModulePayload);
+        yield return new KeyValuePair<string, string>(Path.Combine("modules", "OpenClaw.WorkflowPack.Installer.psm1"), EmbeddedWorkflowPackInstallerModulePayload);
+        yield return new KeyValuePair<string, string>(Path.Combine("modules", "OpenClaw.WorkflowPack.Store.psm1"), EmbeddedWorkflowPackStoreModulePayload);
+    }
+
     private static Dictionary<string, byte[]> GetBundledSupportPayloads(out string sourceDescription)
     {
         Dictionary<string, byte[]> payloads = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
         bool usedEmbeddedPayload = false;
         bool usedAdjacentPayload = false;
 
-        byte[] embeddedMaintenance = TryReadEmbeddedPayload(EmbeddedMaintenanceScriptPayload);
-        if (embeddedMaintenance != null)
+        foreach (KeyValuePair<string, string> definition in GetSupportPayloadDefinitions())
         {
-            payloads["OpenClaw-Maintenance.ps1"] = embeddedMaintenance;
-            usedEmbeddedPayload = true;
-        }
+            byte[] embeddedPayload = TryReadEmbeddedPayload(definition.Value);
+            if (embeddedPayload == null)
+            {
+                continue;
+            }
 
-        byte[] embeddedCoreInstaller = TryReadEmbeddedPayload(EmbeddedCoreInstallerPayload);
-        if (embeddedCoreInstaller != null)
-        {
-            payloads["install-windows-core.ps1"] = embeddedCoreInstaller;
+            payloads[definition.Key] = embeddedPayload;
             usedEmbeddedPayload = true;
         }
 
         string payloadRoot = GetBundledSupportPayloadRoot();
         if (!string.IsNullOrWhiteSpace(payloadRoot))
         {
-            foreach (string fileName in new[] { "OpenClaw-Maintenance.ps1", "install-windows-core.ps1" })
+            foreach (KeyValuePair<string, string> definition in GetSupportPayloadDefinitions())
             {
-                string candidate = Path.Combine(payloadRoot, fileName);
+                string candidate = Path.Combine(payloadRoot, definition.Key);
                 if (!File.Exists(candidate))
                 {
                     continue;
                 }
 
-                payloads[fileName] = File.ReadAllBytes(candidate);
+                payloads[definition.Key] = File.ReadAllBytes(candidate);
                 usedAdjacentPayload = true;
             }
         }
@@ -465,6 +475,12 @@ internal static class Program
             foreach (KeyValuePair<string, byte[]> entry in payloads)
             {
                 string targetPath = Path.Combine(targetRoot, entry.Key);
+                string targetDirectory = Path.GetDirectoryName(targetPath);
+                if (!string.IsNullOrWhiteSpace(targetDirectory))
+                {
+                    Directory.CreateDirectory(targetDirectory);
+                }
+
                 if (FileContentsMatch(targetPath, entry.Value))
                 {
                     continue;
