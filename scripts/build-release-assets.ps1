@@ -176,6 +176,29 @@ function Get-IconPath {
     return $path
 }
 
+function Convert-FileToGzipBase64 {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "Embedded launcher payload source was not found: $Path"
+    }
+
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    $memory = New-Object System.IO.MemoryStream
+    try {
+        $gzip = New-Object System.IO.Compression.GZipStream($memory, [System.IO.Compression.CompressionMode]::Compress, $true)
+        try {
+            $gzip.Write($bytes, 0, $bytes.Length)
+        } finally {
+            $gzip.Dispose()
+        }
+
+        return [Convert]::ToBase64String($memory.ToArray())
+    } finally {
+        $memory.Dispose()
+    }
+}
+
 function Compile-CSharpExecutable {
     param(
         [string]$SourceCode,
@@ -217,8 +240,16 @@ function Compile-CSharpExecutable {
 
 function Get-ReleaseLauncherSupportDefinitions {
     return @(
-        [pscustomobject]@{ FileName = "OpenClaw-Maintenance.ps1"; SourcePath = (Join-Path $repoRoot "client\windows-openclaw-maintenance.ps1") },
-        [pscustomobject]@{ FileName = "install-windows-core.ps1"; SourcePath = (Join-Path $repoRoot "client\install-windows-core.ps1") }
+        [pscustomobject]@{
+            FileName    = "OpenClaw-Maintenance.ps1"
+            SourcePath  = (Join-Path $repoRoot "client\windows-openclaw-maintenance.ps1")
+            Placeholder = "__OPENCLAW_EMBEDDED_SUPPORT_OPENCLAW_MAINTENANCE_GZIP_BASE64__"
+        },
+        [pscustomobject]@{
+            FileName    = "install-windows-core.ps1"
+            SourcePath  = (Join-Path $repoRoot "client\install-windows-core.ps1")
+            Placeholder = "__OPENCLAW_EMBEDDED_SUPPORT_INSTALL_WINDOWS_CORE_GZIP_BASE64__"
+        }
     )
 }
 
@@ -261,6 +292,15 @@ function Build-ReleaseLaunchers {
     }
 
     $source = Get-Content -LiteralPath $sourcePath -Raw -Encoding UTF8
+    foreach ($supportDefinition in (Get-ReleaseLauncherSupportDefinitions)) {
+        if ([string]::IsNullOrWhiteSpace($supportDefinition.Placeholder)) {
+            continue
+        }
+
+        $payloadBase64 = Convert-FileToGzipBase64 -Path $supportDefinition.SourcePath
+        $source = $source.Replace($supportDefinition.Placeholder, $payloadBase64)
+    }
+
     $outputs = @()
     foreach ($definition in (Get-ReleaseLauncherDefinitions -Locale $Locale)) {
         $outputPath = Join-Path $OutputDir $definition.FileName
@@ -288,8 +328,15 @@ function Build-ReleaseLaunchers {
 }
 
 function Get-WorkflowPackIdsForRelease {
-    if (@($PackIds).Count -gt 0) {
-        return @($PackIds)
+    $normalizedPackIds = @(
+        @($PackIds) |
+        Where-Object { -not [string]::IsNullOrWhiteSpace("$_") } |
+        ForEach-Object { "$($_)".Trim() } |
+        Select-Object -Unique
+    )
+
+    if ($normalizedPackIds.Count -gt 0) {
+        return $normalizedPackIds
     }
 
     return @('foundation-common')

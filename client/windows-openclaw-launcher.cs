@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Security.Principal;
 using System.Text;
@@ -19,6 +20,8 @@ internal static class Program
     private const string UiPrefix = "OPENCLAW_UI ";
     private const string WindowTitleSignatureSuffix = " by RZX000";
     private const string RepositoryUrl = "https://github.com/RZX00/openclaw-windows-installer";
+    private const string EmbeddedMaintenanceScriptPayload = "__OPENCLAW_EMBEDDED_SUPPORT_OPENCLAW_MAINTENANCE_GZIP_BASE64__";
+    private const string EmbeddedCoreInstallerPayload = "__OPENCLAW_EMBEDDED_SUPPORT_INSTALL_WINDOWS_CORE_GZIP_BASE64__";
 
     private sealed class LicenseGateResult
     {
@@ -344,28 +347,99 @@ internal static class Program
         }
     }
 
-    private static bool FilesAreIdentical(string firstPath, string secondPath)
+    private static byte[] TryReadEmbeddedPayload(string base64Payload)
     {
         try
         {
-            if (!File.Exists(firstPath) || !File.Exists(secondPath))
+            if (string.IsNullOrWhiteSpace(base64Payload) || base64Payload.StartsWith("__OPENCLAW_EMBEDDED_SUPPORT_", StringComparison.Ordinal))
+            {
+                return null;
+            }
+
+            byte[] compressedBytes = Convert.FromBase64String(base64Payload);
+            using (MemoryStream input = new MemoryStream(compressedBytes))
+            using (GZipStream gzip = new GZipStream(input, CompressionMode.Decompress))
+            using (MemoryStream output = new MemoryStream())
+            {
+                gzip.CopyTo(output);
+                return output.ToArray();
+            }
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static bool FileContentsMatch(string path, byte[] expectedBytes)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(path) || expectedBytes == null || !File.Exists(path))
             {
                 return false;
             }
 
-            FileInfo first = new FileInfo(firstPath);
-            FileInfo second = new FileInfo(secondPath);
-            if (first.Length != second.Length)
+            FileInfo info = new FileInfo(path);
+            if (info.Length != expectedBytes.Length)
             {
                 return false;
             }
 
-            return File.ReadAllBytes(firstPath).SequenceEqual(File.ReadAllBytes(secondPath));
+            return File.ReadAllBytes(path).SequenceEqual(expectedBytes);
         }
         catch
         {
             return false;
         }
+    }
+
+    private static Dictionary<string, byte[]> GetBundledSupportPayloads(out string sourceDescription)
+    {
+        Dictionary<string, byte[]> payloads = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
+        bool usedEmbeddedPayload = false;
+        bool usedAdjacentPayload = false;
+
+        byte[] embeddedMaintenance = TryReadEmbeddedPayload(EmbeddedMaintenanceScriptPayload);
+        if (embeddedMaintenance != null)
+        {
+            payloads["OpenClaw-Maintenance.ps1"] = embeddedMaintenance;
+            usedEmbeddedPayload = true;
+        }
+
+        byte[] embeddedCoreInstaller = TryReadEmbeddedPayload(EmbeddedCoreInstallerPayload);
+        if (embeddedCoreInstaller != null)
+        {
+            payloads["install-windows-core.ps1"] = embeddedCoreInstaller;
+            usedEmbeddedPayload = true;
+        }
+
+        string payloadRoot = GetBundledSupportPayloadRoot();
+        if (!string.IsNullOrWhiteSpace(payloadRoot))
+        {
+            foreach (string fileName in new[] { "OpenClaw-Maintenance.ps1", "install-windows-core.ps1" })
+            {
+                string candidate = Path.Combine(payloadRoot, fileName);
+                if (!File.Exists(candidate))
+                {
+                    continue;
+                }
+
+                payloads[fileName] = File.ReadAllBytes(candidate);
+                usedAdjacentPayload = true;
+            }
+        }
+
+        if (payloads.Count == 0)
+        {
+            sourceDescription = null;
+            return null;
+        }
+
+        sourceDescription = usedAdjacentPayload
+            ? (usedEmbeddedPayload ? "adjacent support + embedded launcher payload" : "adjacent support payload")
+            : "embedded launcher payload";
+        return payloads;
     }
 
     private static void TryRefreshInstalledSupportAssets(string installRoot, string locale, string logPath)
@@ -377,69 +451,32 @@ internal static class Program
                 return;
             }
 
-            string payloadRoot = GetBundledSupportPayloadRoot();
-            if (string.IsNullOrWhiteSpace(payloadRoot))
+            string sourceDescription;
+            Dictionary<string, byte[]> payloads = GetBundledSupportPayloads(out sourceDescription);
+            if (payloads == null || payloads.Count == 0)
             {
                 return;
             }
 
             string targetRoot = Path.Combine(installRoot, "support");
-            string normalizedPayloadRoot = Path.GetFullPath(payloadRoot).TrimEnd(Path.DirectorySeparatorChar);
-            string normalizedTargetRoot = Path.GetFullPath(targetRoot).TrimEnd(Path.DirectorySeparatorChar);
-            if (string.Equals(normalizedPayloadRoot, normalizedTargetRoot, StringComparison.OrdinalIgnoreCase))
-            {
-                return;
-            }
-
-            string[] fileNames =
-            {
-                "OpenClaw-Maintenance.ps1",
-                "install-windows-core.ps1"
-            };
-
-            bool payloadFound = false;
-            foreach (string fileName in fileNames)
-            {
-                if (File.Exists(Path.Combine(payloadRoot, fileName)))
-                {
-                    payloadFound = true;
-                    break;
-                }
-            }
-
-            if (!payloadFound)
-            {
-                return;
-            }
-
             Directory.CreateDirectory(targetRoot);
+
             List<string> refreshedFiles = new List<string>();
-            foreach (string fileName in fileNames)
+            foreach (KeyValuePair<string, byte[]> entry in payloads)
             {
-                string sourcePath = Path.Combine(payloadRoot, fileName);
-                if (!File.Exists(sourcePath))
+                string targetPath = Path.Combine(targetRoot, entry.Key);
+                if (FileContentsMatch(targetPath, entry.Value))
                 {
                     continue;
                 }
 
-                string targetPath = Path.Combine(targetRoot, fileName);
-                if (string.Equals(Path.GetFullPath(sourcePath), Path.GetFullPath(targetPath), StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
-                if (File.Exists(targetPath) && FilesAreIdentical(sourcePath, targetPath))
-                {
-                    continue;
-                }
-
-                File.Copy(sourcePath, targetPath, true);
-                refreshedFiles.Add(fileName);
+                File.WriteAllBytes(targetPath, entry.Value);
+                refreshedFiles.Add(entry.Key);
             }
 
             if (refreshedFiles.Count > 0)
             {
-                Log(logPath, T(locale, "已刷新支持脚本：", "Refreshed support assets: ") + string.Join(", ", refreshedFiles));
+                Log(logPath, T(locale, "已刷新支持脚本：", "Refreshed support assets: ") + string.Join(", ", refreshedFiles) + " (" + sourceDescription + ")");
             }
         }
         catch (Exception ex)
@@ -874,6 +911,7 @@ internal static class Program
         private UiEvent pendingResult;
         private int exitCode = 1;
         private int completionSignaled;
+        private bool forceCloseRequested;
 
         public MaintenanceWindow(MaintenanceMode mode, string locale, string supportScriptPath, string logPath, string installRoot)
         {
@@ -998,9 +1036,9 @@ internal static class Program
             root.Controls.Add(buttonPanel, 0, 2);
 
             closeButton = new Button();
-            closeButton.Text = T("关闭", "Close");
+            closeButton.Text = T("强制关闭", "Force close");
             closeButton.AutoSize = true;
-            closeButton.Enabled = false;
+            closeButton.Enabled = true;
             closeButton.Click += delegate { Close(); };
             buttonPanel.Controls.Add(closeButton);
 
@@ -1029,13 +1067,119 @@ internal static class Program
 
         private void HandleFormClosing(object sender, FormClosingEventArgs e)
         {
-            if (completed)
+            if (completed || forceCloseRequested)
             {
                 return;
             }
 
-            e.Cancel = true;
-            SetStatus(T("任务仍在执行中，请等待完成后再关闭窗口。", "The task is still running. Wait for it to finish before closing the window."), VisualState.Running);
+            if (e.CloseReason == CloseReason.WindowsShutDown || e.CloseReason == CloseReason.TaskManagerClosing)
+            {
+                ForceCloseMaintenance(T("窗口正在关闭，正在终止维护进程。", "Window is closing and the maintenance process is being terminated."));
+                return;
+            }
+
+            DialogResult result = MessageBox.Show(
+                T("维护任务仍在执行中。强制关闭会终止当前维护进程。是否继续？", "Maintenance is still running. Force close will terminate the current maintenance process. Continue?"),
+                GetWindowTitle(mode, locale),
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning,
+                MessageBoxDefaultButton.Button2);
+
+            if (result != DialogResult.Yes)
+            {
+                e.Cancel = true;
+                SetStatus(T("任务仍在执行中，请等待完成后再关闭窗口。", "The task is still running. Wait for it to finish before closing the window."), VisualState.Running);
+                return;
+            }
+
+            ForceCloseMaintenance(T("用户强制关闭维护窗口，正在终止维护进程。", "User forced the maintenance window closed; terminating the maintenance process."));
+        }
+
+        private void ForceCloseMaintenance(string logMessage)
+        {
+            forceCloseRequested = true;
+            completed = true;
+            exitCode = 130;
+            Interlocked.Exchange(ref completionSignaled, 1);
+
+            if (timeoutTimer != null)
+            {
+                timeoutTimer.Stop();
+                timeoutTimer.Dispose();
+                timeoutTimer = null;
+            }
+
+            if (autoCloseTimer != null)
+            {
+                autoCloseTimer.Stop();
+                autoCloseTimer.Dispose();
+                autoCloseTimer = null;
+            }
+
+            AppendLog(logMessage);
+            SetStatus(T("正在强制关闭并终止维护进程。", "Force-closing the window and terminating the maintenance process."), VisualState.Warning);
+            closeButton.Text = T("关闭", "Close");
+
+            TryTerminateMaintenanceProcessTree();
+
+            if (process != null)
+            {
+                try { process.Dispose(); } catch { }
+                process = null;
+            }
+        }
+
+        private void TryTerminateMaintenanceProcessTree()
+        {
+            Process runningProcess = process;
+            if (runningProcess == null)
+            {
+                return;
+            }
+
+            int processId = 0;
+            try
+            {
+                processId = runningProcess.Id;
+            }
+            catch
+            {
+            }
+
+            if (processId > 0)
+            {
+                try
+                {
+                    ProcessStartInfo startInfo = new ProcessStartInfo("taskkill.exe", "/PID " + processId + " /T /F")
+                    {
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                        WindowStyle = ProcessWindowStyle.Hidden
+                    };
+
+                    using (Process killer = Process.Start(startInfo))
+                    {
+                        if (killer != null)
+                        {
+                            killer.WaitForExit(5000);
+                        }
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            try
+            {
+                if (!runningProcess.HasExited)
+                {
+                    runningProcess.Kill();
+                }
+            }
+            catch
+            {
+            }
         }
 
         private void StartMaintenance()
@@ -1516,6 +1660,7 @@ internal static class Program
             }
 
             SetStatus(message, state);
+            closeButton.Text = T("关闭", "Close");
             closeButton.Enabled = true;
 
             if (ShouldAutoCloseWindow(code, timedOut))
