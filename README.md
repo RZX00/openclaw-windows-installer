@@ -1,3 +1,5 @@
+> **已停止维护（2026-10）**：本仓库不再更新。v0.1.7 起的 Release 不再包含下文提到的 `OpenClaw-Setup-Windows-x64.exe`。安装 OpenClaw 请以官方仓库 [openclaw/openclaw](https://github.com/openclaw/openclaw) 为准。
+
 # OpenClaw Windows 一键安装包
 
 <p align="center">
